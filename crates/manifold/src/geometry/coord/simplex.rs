@@ -286,7 +286,7 @@ mod test {
       let computed = simp.difbarys();
       for ibary in 0..simp.nvertices() {
         let expected = ref_difbary(dim, ibary);
-        assert_eq!(computed.column(ibary), expected);
+        assert_eq!(computed.row(ibary), expected);
       }
     }
   }

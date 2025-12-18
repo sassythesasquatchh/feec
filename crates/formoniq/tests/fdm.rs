@@ -235,10 +235,17 @@ fn compare_system_matrics(feec: &Matrix<i32>, fdm: &Matrix<i32>) -> bool {
 }
 
 fn cast_int(mat: Matrix) -> Matrix<i32> {
-  const TOL: f64 = 10e-12;
-  assert!(
-    mat.iter().all(|e| (e - e.round()).abs() <= TOL),
-    "Failed to round matrix:\n{mat:.2}"
-  );
-  mat.try_cast().unwrap()
+  const TOL: f64 = 1e-11;
+
+  let rounded = mat.map(|e| {
+    let r = e.round();
+    assert!(
+      (e - r).abs() <= TOL,
+      "Failed to round entry: e={e}, round={r}, diff={}",
+      (e - r).abs()
+    );
+    r
+  });
+
+  rounded.try_cast().unwrap()
 }
