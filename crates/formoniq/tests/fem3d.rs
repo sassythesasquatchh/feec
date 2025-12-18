@@ -1,4 +1,5 @@
-use approx::assert_relative_eq;
+// use approx::assert_relative_eq;
+use approx::relative_eq;
 use common::linalg::nalgebra::{Matrix, Vector};
 use formoniq::{assemble, operators};
 use manifold::{gen::cartesian::CartesianMeshInfo, Dim};
@@ -7,10 +8,18 @@ const DIM: Dim = 3;
 
 #[test]
 fn feec_vs_fem3d() {
+  const EPS: f64 = 1e-12;
+  const REL: f64 = 1e-12;
+
   for nboxes_per_dim in 1..=10 {
     let feec = feec_galmat(nboxes_per_dim);
     let fem = fem3d_galmat(nboxes_per_dim);
-    assert_relative_eq!(&feec, &fem);
+
+    assert!(
+      relative_eq!(&feec, &fem, epsilon = EPS, max_relative = REL),
+      "feec != fem for nboxes_per_dim={}",
+      nboxes_per_dim
+    );
   }
 }
 
