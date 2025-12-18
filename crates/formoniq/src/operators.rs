@@ -17,16 +17,98 @@ use {
       simplex::{standard_subsimps, Simplex},
     },
   },
+  std::{
+    ops::{AddAssign, Mul},
+    sync::Arc,
+  },
 };
 
 pub type DofIdx = usize;
 pub type DofCoeff = f64;
 
 pub type ElMat = Matrix;
-pub trait ElMatProvider: Sync {
+pub trait ElMatProviderBase: Sync {
   fn row_grade(&self) -> ExteriorGrade;
   fn col_grade(&self) -> ExteriorGrade;
+}
+
+pub trait ElMatProvider: ElMatProviderBase {
   fn eval(&self, geometry: &SimplexLengths) -> ElMat;
+}
+
+pub trait CoordAwareElMatProvider: ElMatProviderBase {
+  fn eval(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat;
+}
+
+pub struct InnerProductWeightClosure<T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T>,
+{
+  f: Arc<dyn Fn(CoordRef) -> T + Sync + Send>,
+}
+
+impl<T> InnerProductWeightClosure<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  pub fn new<F>(f: F) -> Self
+  where
+    F: Fn(CoordRef) -> T + Sync + Send + 'static,
+  {
+    Self { f: Arc::new(f) }
+  }
+
+  pub fn apply(&self, x: CoordRef, coeffs: &Vector) -> Vector {
+    (self.f)(x).apply(coeffs)
+  }
+
+  pub fn apply_batched(&self, x: CoordRef, coeffs: &Matrix) -> Matrix {
+    (self.f)(x).apply_batched(coeffs)
+  }
+}
+
+pub trait ApplyWeight: Send + Sync {
+  fn apply_batched(&self, coeffs: &Matrix) -> Matrix;
+  fn apply(&self, coeffs: &Vector) -> Vector;
+}
+
+impl ApplyWeight for f64 {
+  fn apply_batched(&self, coeffs: &Matrix) -> Matrix {
+    *self * coeffs
+  }
+  fn apply(&self, coeffs: &Vector) -> Vector {
+    *self * coeffs
+  }
+}
+
+impl ApplyWeight for Matrix {
+  fn apply_batched(&self, coeffs: &Matrix) -> Matrix {
+    self * coeffs
+  }
+  fn apply(&self, coeffs: &Vector) -> Vector {
+    self * coeffs
+  }
+}
+
+struct InnerProductWeight<T: ApplyWeight> {
+  weight: T,
+}
+
+impl<T: ApplyWeight> InnerProductWeight<T> {
+  pub fn apply_batched(&self, coeffs: &Matrix) -> Matrix {
+    self.weight.apply_batched(coeffs)
+  }
+}
+
+fn apply_optional_weight<T: ApplyWeight>(
+  weight: Option<&InnerProductWeight<T>>,
+  coeffs: &Matrix,
+) -> Matrix {
+  if let Some(w) = weight {
+    w.apply_batched(coeffs)
+  } else {
+    coeffs.clone()
+  }
 }
 
 /// Exact Element Matrix Provider for the Laplace-Beltrami operator.
@@ -42,13 +124,16 @@ impl LaplaceBeltramiElmat {
     Self { dim, ref_difbarys }
   }
 }
-impl ElMatProvider for LaplaceBeltramiElmat {
+
+impl ElMatProviderBase for LaplaceBeltramiElmat {
   fn row_grade(&self) -> ExteriorGrade {
     0
   }
   fn col_grade(&self) -> ExteriorGrade {
     0
   }
+}
+impl ElMatProvider for LaplaceBeltramiElmat {
   fn eval(&self, geometry: &SimplexLengths) -> ElMat {
     assert!(self.dim == geometry.dim());
     geometry.vol()
@@ -61,13 +146,15 @@ impl ElMatProvider for LaplaceBeltramiElmat {
 
 /// Exact Element Matrix Provider for scalar mass bilinear form.
 pub struct ScalarMassElmat;
-impl ElMatProvider for ScalarMassElmat {
+impl ElMatProviderBase for ScalarMassElmat {
   fn row_grade(&self) -> ExteriorGrade {
     0
   }
   fn col_grade(&self) -> ExteriorGrade {
     0
   }
+}
+impl ElMatProvider for ScalarMassElmat {
   fn eval(&self, geometry: &SimplexLengths) -> ElMat {
     let ndofs = geometry.nvertices();
     let dim = geometry.dim();
@@ -81,13 +168,15 @@ impl ElMatProvider for ScalarMassElmat {
 /// Approximated Element Matrix Provider for scalar mass bilinear form,
 /// obtained through trapezoidal quadrature rule.
 pub struct ScalarLumpedMassElmat;
-impl ElMatProvider for ScalarLumpedMassElmat {
+impl ElMatProviderBase for ScalarLumpedMassElmat {
   fn row_grade(&self) -> ExteriorGrade {
     0
   }
   fn col_grade(&self) -> ExteriorGrade {
     0
   }
+}
+impl ElMatProvider for ScalarLumpedMassElmat {
   fn eval(&self, geomery: &SimplexLengths) -> ElMat {
     let n = geomery.nvertices();
     let v = geomery.vol() / n as f64;
@@ -98,14 +187,36 @@ impl ElMatProvider for ScalarLumpedMassElmat {
 /// Element Matrix for the weak Hodge star operator / the mass bilinear form.
 ///
 /// $M = [inner(star lambda_tau, lambda_sigma)_(L^2 Lambda^k (K))]_(sigma,tau in Delta_k (K))$
-pub struct HodgeMassElmat {
+pub struct HodgeMassElmat<T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
   dim: Dim,
   grade: ExteriorGrade,
   simplices: Vec<Simplex>,
   wedge_terms: Vec<ExteriorElementList>,
+  coords: Option<MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<InnerProductWeightClosure<T>>,
 }
-impl HodgeMassElmat {
-  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> HodgeMassElmat<T> {
+  pub fn new_weighted(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: MeshCoords,
+    qr: SimplexQuadRule,
+    weight: InnerProductWeightClosure<T>,
+  ) -> Self {
+    Self::_new(dim, grade, Some(coords), Some(qr), Some(weight))
+  }
+
+  fn _new(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: Option<MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<InnerProductWeightClosure<T>>,
+  ) -> Self {
     let simplices: Vec<_> = standard_subsimps(dim, grade).collect();
     let wedge_terms: Vec<ExteriorElementList> = simplices
       .iter()
@@ -118,29 +229,58 @@ impl HodgeMassElmat {
       grade,
       simplices,
       wedge_terms,
+      coords,
+      qr,
+      weight,
     }
   }
-}
-impl ElMatProvider for HodgeMassElmat {
-  fn row_grade(&self) -> ExteriorGrade {
-    self.grade
-  }
-  fn col_grade(&self) -> ExteriorGrade {
-    self.grade
-  }
 
-  fn eval(&self, geometry: &SimplexLengths) -> Matrix {
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
     assert_eq!(self.dim, geometry.dim());
 
     let scalar_mass = ScalarMassElmat.eval(geometry);
-
     let mut elmat = Matrix::zeros(self.simplices.len(), self.simplices.len());
+
+    let weight_to_apply = if let Some(weight) = &self.weight {
+      let topology = topology
+        .expect("Weighted HodgeMassElmat requires a cell (topology) to evaluate the weight.");
+      let qr = self
+        .qr
+        .as_ref()
+        .expect("Inner product weight provided, but no quadrature rule specified.");
+      let coords = self
+        .coords
+        .as_ref()
+        .expect("Inner product weight provided, but no mesh coordinates specified.");
+
+      let cell_coords = SimplexCoords::from_simplex_and_coords(topology, coords);
+
+      // vol is set to 1 because we are not integrating over the simplex volume here,
+      // we simply want the average value of the weight function over the simplex.
+      let quadrature_result = qr.integrate_local(
+        &|local: CoordRef| {
+          let global = cell_coords.local2global(local);
+          (weight.f)(global.as_view())
+        },
+        1.0,
+      );
+
+      Some(InnerProductWeight {
+        weight: quadrature_result,
+      })
+    } else {
+      None
+    };
+
     for (i, asimp) in self.simplices.iter().enumerate() {
       for (j, bsimp) in self.simplices.iter().enumerate() {
         let wedge_terms_a = &self.wedge_terms[i];
         let wedge_terms_b = &self.wedge_terms[j];
         let wedge_inners = multi_gramian(&geometry.to_metric_tensor().inverse(), self.grade)
-          .inner_mat(wedge_terms_a.coeffs(), wedge_terms_b.coeffs());
+          .inner_mat(
+            &apply_optional_weight(weight_to_apply.as_ref(), wedge_terms_a.coeffs()),
+            wedge_terms_b.coeffs(),
+          );
 
         let nvertices = self.grade + 1;
         let mut sum = 0.0;
@@ -162,93 +302,258 @@ impl ElMatProvider for HodgeMassElmat {
   }
 }
 
+impl HodgeMassElmat<f64> {
+  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
+    Self::_new(dim, grade, None, None, None)
+  }
+}
+
+impl<T> ElMatProviderBase for HodgeMassElmat<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  fn row_grade(&self) -> ExteriorGrade {
+    self.grade
+  }
+  fn col_grade(&self) -> ExteriorGrade {
+    self.grade
+  }
+}
+
+impl<T> CoordAwareElMatProvider for HodgeMassElmat<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  fn eval(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat {
+    self._eval(geometry, Some(cell))
+  }
+}
+
+impl<T> ElMatProvider for HodgeMassElmat<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  fn eval(&self, geometry: &SimplexLengths) -> ElMat {
+    // This is only valid for the unweighted case
+    debug_assert!(self.weight.is_none());
+    self._eval(geometry, None)
+  }
+}
 /// Element Matrix Provider for the weak mixed exterior derivative $(dif sigma, v)$.
 ///
 /// $A = [inner(dif lambda_J, lambda_I)_(L^2 Lambda^k (K))]_(I in Delta_, J in Delta_(k-1) (K))$
-pub struct DifElmat {
-  mass: HodgeMassElmat,
+pub struct DifElmat<T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  mass: HodgeMassElmat<T>,
   dif: Matrix,
 }
-impl DifElmat {
-  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
-    let mass = HodgeMassElmat::new(dim, grade);
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> DifElmat<T> {
+  pub fn new_weighted(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: MeshCoords,
+    qr: SimplexQuadRule,
+    weight: InnerProductWeightClosure<T>,
+  ) -> Self {
+    Self::_new(dim, grade, Some(coords), Some(qr), Some(weight))
+  }
+
+  pub fn _new(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: Option<MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<InnerProductWeightClosure<T>>,
+  ) -> Self {
+    let mass = HodgeMassElmat::_new(dim, grade, coords, qr, weight);
     let dif = Complex::standard(dim).exterior_derivative_operator(grade - 1);
     let dif = Matrix::from(&dif);
     Self { mass, dif }
   }
+
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
+    let mass = self.mass._eval(geometry, topology);
+    mass * &self.dif
+  }
 }
 
-impl ElMatProvider for DifElmat {
+impl DifElmat<f64> {
+  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
+    Self::_new(dim, grade, None, None, None)
+  }
+}
+
+impl<T> ElMatProviderBase for DifElmat<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
   fn row_grade(&self) -> ExteriorGrade {
     self.mass.grade
   }
   fn col_grade(&self) -> ExteriorGrade {
     self.mass.grade - 1
   }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProvider for DifElmat<T> {
   fn eval(&self, geometry: &SimplexLengths) -> Matrix {
-    let mass = self.mass.eval(geometry);
-    mass * &self.dif
+    // This is only valid for the unweighted case
+    debug_assert!(self.mass.weight.is_none());
+    self._eval(geometry, None)
+  }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider for DifElmat<T> {
+  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+    self._eval(geometry, Some(topology))
   }
 }
 
 /// Element Matrix Provider for the weak mixed codifferential $(u, dif tau)$.
 ///
 /// $A = [inner(lambda_J, dif lambda_I)_(L^2 Lambda^k (K))]_(I in Delta_(k-1), J in Delta_k (K))$
-pub struct CodifElmat {
-  mass: HodgeMassElmat,
+pub struct CodifElmat<T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  mass: HodgeMassElmat<T>,
   codif: Matrix,
 }
-impl CodifElmat {
-  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
-    let mass = HodgeMassElmat::new(dim, grade);
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CodifElmat<T> {
+  pub fn new_weighted(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: MeshCoords,
+    qr: SimplexQuadRule,
+    weight: InnerProductWeightClosure<T>,
+  ) -> Self {
+    Self::_new(dim, grade, Some(coords), Some(qr), Some(weight))
+  }
+
+  pub fn _new(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: Option<MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<InnerProductWeightClosure<T>>,
+  ) -> Self {
+    let mass = HodgeMassElmat::_new(dim, grade, coords, qr, weight);
     let dif = Complex::standard(dim).exterior_derivative_operator(grade - 1);
     let dif = Matrix::from(&dif);
     let codif = dif.transpose();
     Self { mass, codif }
   }
-}
-impl ElMatProvider for CodifElmat {
-  fn row_grade(&self) -> ExteriorGrade {
-    self.mass.grade - 1
+
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
+    let mass = self.mass._eval(geometry, topology);
+    &self.codif * mass
   }
-  fn col_grade(&self) -> ExteriorGrade {
+}
+
+impl CodifElmat<f64> {
+  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
+    Self::_new(dim, grade, None, None, None)
+  }
+}
+
+impl<T> ElMatProviderBase for CodifElmat<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  fn row_grade(&self) -> ExteriorGrade {
     self.mass.grade
   }
+  fn col_grade(&self) -> ExteriorGrade {
+    self.mass.grade - 1
+  }
+}
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider for CodifElmat<T> {
+  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+    self._eval(geometry, Some(topology))
+  }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProvider for CodifElmat<T> {
   fn eval(&self, geometry: &SimplexLengths) -> Matrix {
-    let mass = self.mass.eval(geometry);
-    &self.codif * mass
+    // This is only valid for the unweighted case
+    debug_assert!(self.mass.weight.is_none());
+    self._eval(geometry, None)
   }
 }
 
 /// Element Matrix Provider for the $(dif u, dif v)$ bilinear form.
 ///
 /// $A = [inner(dif lambda_J, dif lambda_I)_(L^2 Lambda^(k+1) (K))]_(I,J in Delta_k (K))$
-pub struct CodifDifElmat {
-  mass: HodgeMassElmat,
+pub struct CodifDifElmat<T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  mass: HodgeMassElmat<T>,
   dif: Matrix,
   codif: Matrix,
 }
-impl CodifDifElmat {
-  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
-    let mass = HodgeMassElmat::new(dim, grade + 1);
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CodifDifElmat<T> {
+  pub fn new_weighted(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: MeshCoords,
+    qr: SimplexQuadRule,
+    weight: InnerProductWeightClosure<T>,
+  ) -> Self {
+    Self::_new(dim, grade, Some(coords), Some(qr), Some(weight))
+  }
+
+  pub fn _new(
+    dim: Dim,
+    grade: ExteriorGrade,
+    coords: Option<MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<InnerProductWeightClosure<T>>,
+  ) -> Self {
+    let mass = HodgeMassElmat::_new(dim, grade + 1, coords, qr, weight);
     let dif = Complex::standard(dim).exterior_derivative_operator(grade);
     let dif = Matrix::from(&dif);
     let codif = dif.transpose();
 
     Self { mass, dif, codif }
   }
+
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
+    let mass = self.mass._eval(geometry, topology);
+    &self.codif * mass * &self.dif
+  }
 }
 
-impl ElMatProvider for CodifDifElmat {
+impl CodifDifElmat<f64> {
+  pub fn new(dim: Dim, grade: ExteriorGrade) -> Self {
+    Self::_new(dim, grade, None, None, None)
+  }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProviderBase for CodifDifElmat<T> {
   fn row_grade(&self) -> ExteriorGrade {
     self.mass.grade - 1
   }
   fn col_grade(&self) -> ExteriorGrade {
     self.mass.grade - 1
   }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider
+  for CodifDifElmat<T>
+{
+  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+    self._eval(geometry, Some(topology))
+  }
+}
+
+impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProvider for CodifDifElmat<T> {
   fn eval(&self, geometry: &SimplexLengths) -> Matrix {
-    let mass = self.mass.eval(geometry);
-    &self.codif * mass * &self.dif
+    // This is only valid for the unweighted case
+    debug_assert!(self.mass.weight.is_none());
+    self._eval(geometry, None)
   }
 }
 
@@ -258,30 +563,58 @@ pub trait ElVecProvider: Sync {
   fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> ElVec;
 }
 
-pub struct SourceElVec<'a, F>
+pub struct SourceElVec<'a, F, T>
 where
   F: ExteriorField,
+  T: ApplyWeight + AddAssign + Mul<f64, Output = T>,
 {
   source: &'a F,
   mesh_coords: &'a MeshCoords,
   qr: SimplexQuadRule,
+  weight: Option<InnerProductWeightClosure<T>>,
 }
-impl<'a, F> SourceElVec<'a, F>
+impl<'a, F, T> SourceElVec<'a, F, T>
 where
   F: ExteriorField,
+  T: ApplyWeight + AddAssign + Mul<f64, Output = T>,
 {
-  pub fn new(source: &'a F, mesh_coords: &'a MeshCoords, qr: Option<SimplexQuadRule>) -> Self {
+  pub fn new_weighted(
+    source: &'a F,
+    mesh_coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: InnerProductWeightClosure<T>,
+  ) -> Self {
+    Self::_new(source, mesh_coords, qr, Some(weight))
+  }
+
+  pub fn _new(
+    source: &'a F,
+    mesh_coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<InnerProductWeightClosure<T>>,
+  ) -> Self {
     let qr = qr.unwrap_or(SimplexQuadRule::barycentric(source.dim_intrinsic()));
     Self {
       source,
       mesh_coords,
       qr,
+      weight,
     }
   }
 }
-impl<F> ElVecProvider for SourceElVec<'_, F>
+
+impl<'a, F> SourceElVec<'a, F, f64>
+where
+  F: ExteriorField,
+{
+  pub fn new(source: &'a F, mesh_coords: &'a MeshCoords, qr: Option<SimplexQuadRule>) -> Self {
+    Self::_new(source, mesh_coords, qr, None)
+  }
+}
+impl<F, T> ElVecProvider for SourceElVec<'_, F, T>
 where
   F: Sync + ExteriorField,
+  T: ApplyWeight + AddAssign + Mul<f64, Output = T>,
 {
   fn grade(&self) -> ExteriorGrade {
     self.source.grade()
@@ -304,14 +637,21 @@ where
     for (iwhitney, whitney) in whitneys.iter().enumerate() {
       let inner_pointwise = |local: CoordRef| {
         let global = cell_coords.local2global(local);
-        inner.inner(
-          self
-            .source
-            .at_point(&global)
-            .precompose_form(&cell_coords.linear_transform())
-            .coeffs(),
-          whitney.at_point(local).coeffs(),
-        )
+        let ref_source = self
+          .source
+          .at_point(&global)
+          .precompose_form(&cell_coords.linear_transform());
+
+        let source_coeffs = ref_source.coeffs();
+
+        let weighted_owned = self
+          .weight
+          .as_ref()
+          .map(|weight| weight.apply(global.as_view(), &source_coeffs));
+
+        let weighted_source = weighted_owned.as_ref().unwrap_or(&source_coeffs);
+
+        inner.inner(weighted_source, whitney.at_point(local).coeffs())
       };
       let value = self.qr.integrate_local(&inner_pointwise, geometry.vol());
       elvec[iwhitney] = value;
@@ -322,8 +662,10 @@ where
 
 #[cfg(test)]
 mod test {
-  use super::*;
-  use crate::operators::{ElMatProvider, LaplaceBeltramiElmat, ScalarMassElmat};
+  use crate::operators::{
+    CodifDifElmat, CodifElmat, DifElmat, ElMatProvider, HodgeMassElmat, LaplaceBeltramiElmat,
+    Matrix, ScalarMassElmat,
+  };
 
   use ddf::whitney::lsf::WhitneyLsf;
   use exterior::term::multi_gramian;

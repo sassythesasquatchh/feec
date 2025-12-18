@@ -1,25 +1,31 @@
-use crate::operators::{DofIdx, ElMatProvider, ElVecProvider};
+use crate::operators::{CoordAwareElMatProvider, DofIdx, ElMatProvider, ElVecProvider};
 
 use common::{
   linalg::nalgebra::{CooMatrix, CooMatrixExt, CsrMatrix, Matrix, Vector},
   util,
 };
+use exterior::ExteriorGrade;
 use itertools::{multizip, Itertools};
-use manifold::{geometry::metric::mesh::MeshLengths, topology::complex::Complex};
+use manifold::{
+  geometry::metric::{mesh::MeshLengths, simplex::SimplexLengths},
+  topology::{complex::Complex, simplex::Simplex},
+};
 
 use rayon::prelude::*;
 use std::collections::HashSet;
 
 pub type GalMat = CooMatrix;
-/// Assembly algorithm for the Galerkin Matrix.
-pub fn assemble_galmat(
+
+fn assemble_galmat_impl<M>(
   topology: &Complex,
   geometry: &MeshLengths,
-  elmat: impl ElMatProvider,
-) -> GalMat {
-  let row_grade = elmat.row_grade();
-  let col_grade = elmat.col_grade();
-
+  row_grade: ExteriorGrade,
+  col_grade: ExteriorGrade,
+  eval: impl Fn(&SimplexLengths, &Simplex) -> M + Sync,
+) -> GalMat
+where
+  M: std::ops::Index<(usize, usize), Output = f64> + Send,
+{
   let nsimps_row = topology.skeleton(row_grade).len();
   let nsimps_col = topology.skeleton(col_grade).len();
 
@@ -29,7 +35,7 @@ pub fn assemble_galmat(
     .par_bridge()
     .flat_map(|cell| {
       let geo = geometry.simplex_lengths(cell);
-      let elmat = elmat.eval(&geo);
+      let elmat = eval(&geo, &cell);
 
       let row_subs: Vec<_> = cell.mesh_subsimps(row_grade).collect();
       let col_subs: Vec<_> = cell.mesh_subsimps(col_grade).collect();
@@ -51,6 +57,66 @@ pub fn assemble_galmat(
   let (rows, cols, values) = triplets.into_iter().multiunzip();
   GalMat::try_from_triplets(nsimps_row, nsimps_col, rows, cols, values).unwrap()
 }
+
+pub fn assemble_galmat(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  elmat: impl ElMatProvider + Sync,
+) -> GalMat {
+  let (r, c) = (elmat.row_grade(), elmat.col_grade());
+  assemble_galmat_impl(topology, geometry, r, c, move |geo, _cell| elmat.eval(geo))
+}
+
+pub fn assemble_galmat_coord_aware(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  elmat: impl CoordAwareElMatProvider + Sync,
+) -> GalMat {
+  let (r, c) = (elmat.row_grade(), elmat.col_grade());
+  assemble_galmat_impl(topology, geometry, r, c, move |geo, cell| {
+    elmat.eval(geo, cell)
+  })
+}
+/// Assembly algorithm for the Galerkin Matrix.
+// pub fn assemble_galmat(
+//   topology: &Complex,
+//   geometry: &MeshLengths,
+//   elmat: impl ElMatProvider,
+// ) -> GalMat {
+//   let row_grade = elmat.row_grade();
+//   let col_grade = elmat.col_grade();
+
+//   let nsimps_row = topology.skeleton(row_grade).len();
+//   let nsimps_col = topology.skeleton(col_grade).len();
+
+//   let triplets: Vec<(usize, usize, f64)> = topology
+//     .cells()
+//     .handle_iter()
+//     .par_bridge()
+//     .flat_map(|cell| {
+//       let geo = geometry.simplex_lengths(cell);
+//       let elmat = elmat.eval(&geo);
+
+//       let row_subs: Vec<_> = cell.mesh_subsimps(row_grade).collect();
+//       let col_subs: Vec<_> = cell.mesh_subsimps(col_grade).collect();
+
+//       let mut local_triplets = Vec::new();
+//       for (ilocal, &iglobal) in row_subs.iter().enumerate() {
+//         for (jlocal, &jglobal) in col_subs.iter().enumerate() {
+//           let val = elmat[(ilocal, jlocal)];
+//           if val != 0.0 {
+//             local_triplets.push((iglobal.kidx(), jglobal.kidx(), val));
+//           }
+//         }
+//       }
+
+//       local_triplets
+//     })
+//     .collect();
+
+//   let (rows, cols, values) = triplets.into_iter().multiunzip();
+//   GalMat::try_from_triplets(nsimps_row, nsimps_col, rows, cols, values).unwrap()
+// }
 
 pub type GalVec = Vector;
 /// Assembly algorithm for the Galerkin Vector.

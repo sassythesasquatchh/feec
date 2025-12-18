@@ -1,3 +1,5 @@
+use std::ops::{AddAssign, Mul};
+
 use super::{
   mesh::MeshCoords,
   simplex::{barycenter_local, SimplexCoords},
@@ -13,6 +15,7 @@ use common::linalg::nalgebra::{Matrix, Vector};
 /// A quadrature rule defined on the reference simplex.
 ///
 /// Can be used to integrate functions defined on the reference simplex.
+/// Functions can be scalar or matrix valued.
 pub struct SimplexQuadRule {
   /// Points in local coordinates.
   points: na::DMatrix<f64>,
@@ -26,16 +29,20 @@ impl SimplexQuadRule {
   pub fn npoints(&self) -> usize {
     self.points.ncols()
   }
+
   /// Uses a local coordinate function `f`.
-  pub fn integrate_local<F>(&self, f: &F, vol: f64) -> f64
+  pub fn integrate_local<T, F>(&self, f: &F, vol: f64) -> T
   where
-    F: Fn(CoordRef) -> f64,
+    F: Fn(CoordRef) -> T,
+    T: AddAssign + Mul<f64, Output = T>,
   {
-    let mut integral = 0.0;
-    for i in 0..self.npoints() {
-      integral += self.weights[i] * f(self.points.column(i));
+    let n = self.npoints();
+    debug_assert!(n > 0, "quadrature rule has no points");
+    let mut integral = f(self.points.column(0)) * self.weights[0];
+    for i in 1..n {
+      integral += f(self.points.column(i)) * self.weights[i];
     }
-    vol * integral
+    integral * vol
   }
 
   /// Uses a global coordinate function `f`.
