@@ -16,6 +16,7 @@ use std::collections::HashSet;
 
 pub type GalMat = CooMatrix;
 
+/// Assembly algorithm for the Galerkin Matrix.
 fn assemble_galmat_impl<M>(
   topology: &Complex,
   geometry: &MeshLengths,
@@ -74,49 +75,9 @@ pub fn assemble_galmat_coord_aware(
 ) -> GalMat {
   let (r, c) = (elmat.row_grade(), elmat.col_grade());
   assemble_galmat_impl(topology, geometry, r, c, move |geo, cell| {
-    elmat.eval(geo, cell)
+    elmat.eval_with_coords(geo, cell)
   })
 }
-/// Assembly algorithm for the Galerkin Matrix.
-// pub fn assemble_galmat(
-//   topology: &Complex,
-//   geometry: &MeshLengths,
-//   elmat: impl ElMatProvider,
-// ) -> GalMat {
-//   let row_grade = elmat.row_grade();
-//   let col_grade = elmat.col_grade();
-
-//   let nsimps_row = topology.skeleton(row_grade).len();
-//   let nsimps_col = topology.skeleton(col_grade).len();
-
-//   let triplets: Vec<(usize, usize, f64)> = topology
-//     .cells()
-//     .handle_iter()
-//     .par_bridge()
-//     .flat_map(|cell| {
-//       let geo = geometry.simplex_lengths(cell);
-//       let elmat = elmat.eval(&geo);
-
-//       let row_subs: Vec<_> = cell.mesh_subsimps(row_grade).collect();
-//       let col_subs: Vec<_> = cell.mesh_subsimps(col_grade).collect();
-
-//       let mut local_triplets = Vec::new();
-//       for (ilocal, &iglobal) in row_subs.iter().enumerate() {
-//         for (jlocal, &jglobal) in col_subs.iter().enumerate() {
-//           let val = elmat[(ilocal, jlocal)];
-//           if val != 0.0 {
-//             local_triplets.push((iglobal.kidx(), jglobal.kidx(), val));
-//           }
-//         }
-//       }
-
-//       local_triplets
-//     })
-//     .collect();
-
-//   let (rows, cols, values) = triplets.into_iter().multiunzip();
-//   GalMat::try_from_triplets(nsimps_row, nsimps_col, rows, cols, values).unwrap()
-// }
 
 pub type GalVec = Vector;
 /// Assembly algorithm for the Galerkin Vector.

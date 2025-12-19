@@ -37,7 +37,7 @@ pub trait ElMatProvider: ElMatProviderBase {
 }
 
 pub trait CoordAwareElMatProvider: ElMatProviderBase {
-  fn eval(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat;
+  fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat;
 }
 
 pub struct InnerProductWeightClosure<T = f64>
@@ -324,7 +324,7 @@ impl<T> CoordAwareElMatProvider for HodgeMassElmat<T>
 where
   T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
 {
-  fn eval(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat {
+  fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> ElMat {
     self._eval(geometry, Some(cell))
   }
 }
@@ -406,7 +406,7 @@ impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProvider for DifElm
 }
 
 impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider for DifElmat<T> {
-  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+  fn eval_with_coords(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
     self._eval(geometry, Some(topology))
   }
 }
@@ -470,7 +470,7 @@ where
   }
 }
 impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider for CodifElmat<T> {
-  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+  fn eval_with_coords(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
     self._eval(geometry, Some(topology))
   }
 }
@@ -544,7 +544,7 @@ impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> ElMatProviderBase for Co
 impl<T: AddAssign + Mul<f64, Output = T> + ApplyWeight> CoordAwareElMatProvider
   for CodifDifElmat<T>
 {
-  fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
+  fn eval_with_coords(&self, geometry: &SimplexLengths, topology: &Simplex) -> Matrix {
     self._eval(geometry, Some(topology))
   }
 }
@@ -663,15 +663,17 @@ where
 #[cfg(test)]
 mod test {
   use crate::operators::{
-    CodifDifElmat, CodifElmat, DifElmat, ElMatProvider, HodgeMassElmat, LaplaceBeltramiElmat,
-    Matrix, ScalarMassElmat,
+    CodifDifElmat, CodifElmat, CoordAwareElMatProvider, DifElmat, ElMatProvider, HodgeMassElmat,
+    InnerProductWeightClosure, LaplaceBeltramiElmat, Matrix, ScalarMassElmat,
   };
 
+  use approx::assert_relative_eq;
   use ddf::whitney::lsf::WhitneyLsf;
   use exterior::term::multi_gramian;
+  use manifold::geometry::coord::mesh::MeshCoords;
+  use manifold::geometry::coord::quadrature::SimplexQuadRule;
+  use manifold::topology::complex::Complex;
   use manifold::{geometry::metric::simplex::SimplexLengths, topology::simplex::standard_subsimps};
-
-  use approx::assert_relative_eq;
 
   #[test]
   fn codifdif0_is_laplace_beltrami() {
@@ -758,5 +760,87 @@ mod test {
         assert_relative_eq!(&difdif, &inner);
       }
     }
+  }
+
+  #[test]
+  fn weighted_hodge_mass_scales_with_constant_scalar_weight() {
+    const W: f64 = 2.5;
+    const RTOL: f64 = 1e-12;
+
+    for dim in 1..=3 {
+      let geo = SimplexLengths::standard(dim);
+      let topo = Complex::standard(dim);
+      let cell = topo.cells().handle_iter().next().unwrap();
+
+      for grade in 0..=dim {
+        let unweighted = HodgeMassElmat::new(dim, grade).eval(&geo);
+
+        let coords = MeshCoords::standard(dim);
+        let qr = SimplexQuadRule::barycentric(dim);
+        let weight = InnerProductWeightClosure::new(|_| W);
+
+        let weighted = HodgeMassElmat::new_weighted(dim, grade, coords, qr, weight)
+          .eval_with_coords(&geo, &cell);
+
+        let expected = W * &unweighted;
+        assert_relative_eq!(&weighted, &expected, max_relative = RTOL);
+      }
+    }
+  }
+
+  #[test]
+  fn weighted_hodge_mass_uses_cell_average_for_affine_weight_with_barycentric_qr() {
+    // With barycentric quadrature and an affine weight w(x),
+    // the implementation uses the (approx) cell-average, which matches w(barycenter).
+    const RTOL: f64 = 1e-12;
+
+    let dim = 2;
+    let grade = 0;
+
+    let geo = SimplexLengths::standard(dim);
+    let topo = Complex::standard(dim);
+    let cell = topo.cells().handle_iter().next().unwrap();
+
+    // affine weight: w(x) = 1 + x0
+    // on the standard simplex in R^dim, avg(x0) = 1/(dim+1), hence avg(w) = 1 + 1/(dim+1)
+    let expected_w_avg = 1.0 + 1.0 / (dim as f64 + 1.0);
+
+    let unweighted = HodgeMassElmat::new(dim, grade).eval(&geo);
+
+    let coords = MeshCoords::standard(dim);
+    let qr = SimplexQuadRule::barycentric(dim);
+    let weight = InnerProductWeightClosure::new(|x| 1.0 + x[0]);
+
+    let weighted =
+      HodgeMassElmat::new_weighted(dim, grade, coords, qr, weight).eval_with_coords(&geo, &cell);
+
+    let expected = expected_w_avg * &unweighted;
+    assert_relative_eq!(&weighted, &expected, max_relative = RTOL);
+  }
+
+  #[test]
+  fn weighted_hodge_mass_matrix_identity_matches_unweighted() {
+    // sanity check that matrix-valued weights work and identity leaves the result unchanged
+    const RTOL: f64 = 1e-12;
+
+    let dim = 2;
+    let grade = 1;
+
+    let geo = SimplexLengths::standard(dim);
+    let topo = Complex::standard(dim);
+    let cell = topo.cells().handle_iter().next().unwrap();
+
+    let unweighted = HodgeMassElmat::<f64>::new(dim, grade).eval(&geo);
+
+    let coords = MeshCoords::standard(dim);
+    let qr = SimplexQuadRule::barycentric(dim);
+
+    // For 1-forms in 2D, coeff dimension is 2, so use 2x2 identity.
+    let weight = InnerProductWeightClosure::new(|_| Matrix::identity(2, 2));
+
+    let weighted = HodgeMassElmat::<Matrix>::new_weighted(dim, grade, coords, qr, weight)
+      .eval_with_coords(&geo, &cell);
+
+    assert_relative_eq!(&weighted, &unweighted, max_relative = RTOL);
   }
 }
