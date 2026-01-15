@@ -47,7 +47,7 @@ fn ref_laplacian(dim: Dim) -> Option<Matrix> {
 
 #[test]
 fn mass_refcell() {
-  check_ref_elmat(|_| operators::ScalarMassElmat, ref_mass);
+  check_ref_elmat(|_| operators::ScalarMassElmat::new(), ref_mass);
 }
 fn ref_mass(dim: Dim) -> Option<Matrix> {
   #[rustfmt::skip]

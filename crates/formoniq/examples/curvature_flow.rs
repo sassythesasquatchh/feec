@@ -38,7 +38,7 @@ fn main() {
       &metric,
       operators::LaplaceBeltramiElmat::new(dim),
     );
-    let mass = assemble::assemble_galmat(&topology, &metric, operators::ScalarMassElmat);
+    let mass = assemble::assemble_galmat(&topology, &metric, operators::ScalarMassElmat::new());
     let source = Vector::zeros(nvertices);
 
     let coords_initial = coords_list.first().unwrap();

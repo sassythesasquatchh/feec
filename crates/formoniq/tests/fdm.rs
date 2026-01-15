@@ -207,7 +207,7 @@ fn feec_galmat_full(dim: Dim, nboxes_axis: usize) -> Matrix {
     operators::LaplaceBeltramiElmat::new(dim),
   );
   let mut galmat = Matrix::from(&galmat);
-  let mass = assemble::assemble_galmat(&topology, &metric, operators::ScalarMassElmat);
+  let mass = assemble::assemble_galmat(&topology, &metric, operators::ScalarMassElmat::new());
   let mass = Matrix::from(&mass);
   let mut galvec = mass * Vector::from_element(topology.vertices().len(), 1.0);
   normalize_galerkin_lse(&mut galmat, &mut galvec);

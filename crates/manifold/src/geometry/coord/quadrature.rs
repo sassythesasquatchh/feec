@@ -16,6 +16,7 @@ use common::linalg::nalgebra::{Matrix, Vector};
 ///
 /// Can be used to integrate functions defined on the reference simplex.
 /// Functions can be scalar or matrix valued.
+#[derive(Debug, Clone)]
 pub struct SimplexQuadRule {
   /// Points in local coordinates.
   points: na::DMatrix<f64>,

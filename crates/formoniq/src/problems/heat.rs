@@ -34,7 +34,7 @@ where
     geometry,
     operators::LaplaceBeltramiElmat::new(dim),
   );
-  let mut mass = assemble::assemble_galmat(topology, geometry, operators::ScalarMassElmat);
+  let mut mass = assemble::assemble_galmat(topology, geometry, operators::ScalarMassElmat::new());
   let mass_csr = CsrMatrix::from(&mass);
   let mut source = &mass_csr * &source_data.coeffs;
 

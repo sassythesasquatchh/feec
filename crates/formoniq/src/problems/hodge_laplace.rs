@@ -1,12 +1,14 @@
 use crate::{
-  assemble::{assemble_galmat, GalMat, GalVec},
-  operators::HodgeMassElmat,
+  assemble::{assemble_galmat, assemble_galmat_coord_aware, GalMat, GalVec},
+  operators::{HodgeMassElmat, InnerProductWeightClosure},
 };
 
 use {
   common::linalg::petsc::{petsc_ghiep, petsc_saddle_point},
   ddf::{cochain::Cochain, ManifoldComplexExt},
   exterior::ExteriorGrade,
+  manifold::geometry::coord::mesh::MeshCoords,
+  manifold::geometry::coord::quadrature::SimplexQuadRule,
   manifold::{geometry::metric::mesh::MeshLengths, topology::complex::Complex},
 };
 
@@ -21,9 +23,66 @@ pub fn solve_hodge_laplace_source(
   grade: ExteriorGrade,
   homology_dim: usize,
 ) -> (Cochain, Cochain, Cochain) {
-  let harmonics = solve_hodge_laplace_harmonics(topology, geometry, grade, homology_dim);
+  impl_solve_hodge_laplace_source(
+    topology,
+    geometry,
+    source_galvec,
+    grade,
+    homology_dim,
+    None,
+    None,
+    None,
+  )
+}
 
-  let galmats = MixedGalmats::compute(topology, geometry, grade);
+pub fn solve_weighted_hodge_laplace_source(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  source_galvec: GalVec,
+  grade: ExteriorGrade,
+  homology_dim: usize,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure,
+) -> (Cochain, Cochain, Cochain) {
+  impl_solve_hodge_laplace_source(
+    topology,
+    geometry,
+    source_galvec,
+    grade,
+    homology_dim,
+    Some(coords),
+    qr,
+    Some(weight),
+  )
+}
+
+fn impl_solve_hodge_laplace_source(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  source_galvec: GalVec,
+  grade: ExteriorGrade,
+  homology_dim: usize,
+  coords: Option<&MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&InnerProductWeightClosure>,
+) -> (Cochain, Cochain, Cochain) {
+  let harmonics = impl_solve_hodge_laplace_harmonics(
+    topology,
+    geometry,
+    grade,
+    homology_dim,
+    coords,
+    qr.clone(),
+    weight,
+  );
+
+  // TODO The galmats are already built when computing the harmonics, so rebuilding them here is inefficient
+  let galmats = if let (Some(coords), Some(weight)) = (coords, weight) {
+    MixedGalmats::compute_weighted(topology, geometry, grade, coords, qr.clone(), weight)
+  } else {
+    MixedGalmats::compute(topology, geometry, grade)
+  };
 
   let mass_u = CsrMatrix::from(&galmats.mass_u);
   let mass_harmonics = &mass_u * &harmonics;
@@ -80,12 +139,45 @@ pub fn solve_hodge_laplace_harmonics(
   grade: ExteriorGrade,
   homology_dim: usize,
 ) -> Matrix {
+  impl_solve_hodge_laplace_harmonics(topology, geometry, grade, homology_dim, None, None, None)
+}
+
+pub fn solve_weighted_hodge_laplace_harmonics(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  grade: ExteriorGrade,
+  homology_dim: usize,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure,
+) -> Matrix {
+  impl_solve_hodge_laplace_harmonics(
+    topology,
+    geometry,
+    grade,
+    homology_dim,
+    Some(coords),
+    qr,
+    Some(weight),
+  )
+}
+
+fn impl_solve_hodge_laplace_harmonics(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  grade: ExteriorGrade,
+  homology_dim: usize,
+  coords: Option<&MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&InnerProductWeightClosure>,
+) -> Matrix {
   if homology_dim == 0 {
     let nwhitneys = topology.nsimplices(grade);
     return Matrix::zeros(nwhitneys, 0);
   }
 
-  let (eigenvals, _, harmonics) = solve_hodge_laplace_evp(topology, geometry, grade, homology_dim);
+  let (eigenvals, _, harmonics) =
+    impl_solve_hodge_laplace_evp(topology, geometry, grade, homology_dim, coords, qr, weight);
   assert!(eigenvals.iter().all(|&eigenval| eigenval <= 1e-12));
   harmonics
 }
@@ -96,7 +188,43 @@ pub fn solve_hodge_laplace_evp(
   grade: ExteriorGrade,
   neigen_values: usize,
 ) -> (Vector, Matrix, Matrix) {
-  let galmats = MixedGalmats::compute(topology, geometry, grade);
+  impl_solve_hodge_laplace_evp(topology, geometry, grade, neigen_values, None, None, None)
+}
+
+pub fn solve_weighted_hodge_laplace_evp(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  grade: ExteriorGrade,
+  neigen_values: usize,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure,
+) -> (Vector, Matrix, Matrix) {
+  impl_solve_hodge_laplace_evp(
+    topology,
+    geometry,
+    grade,
+    neigen_values,
+    Some(coords),
+    qr,
+    Some(weight),
+  )
+}
+
+fn impl_solve_hodge_laplace_evp(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  grade: ExteriorGrade,
+  neigen_values: usize,
+  coords: Option<&MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&InnerProductWeightClosure>,
+) -> (Vector, Matrix, Matrix) {
+  let galmats = if let (Some(coords), Some(weight)) = (coords, weight) {
+    MixedGalmats::compute_weighted(topology, geometry, grade, coords, qr, weight)
+  } else {
+    MixedGalmats::compute(topology, geometry, grade)
+  };
 
   let lhs = galmats.mixed_hodge_laplacian();
 
@@ -150,6 +278,69 @@ impl MixedGalmats {
 
     let codifdif_u = if grade < topology.dim() {
       let mass_plus = assemble_galmat(topology, geometry, HodgeMassElmat::new(dim, grade + 1));
+      let mass_plus = CsrMatrix::from(&mass_plus);
+      let exdif_u = topology.exterior_derivative_operator(grade);
+      let exdif_u = CsrMatrix::from(&exdif_u);
+      let codifdif_u = exdif_u.transpose() * mass_plus * exdif_u;
+      CooMatrix::from(&codifdif_u)
+    } else {
+      GalMat::new(0, 0)
+    };
+
+    Self {
+      mass_sigma,
+      dif_sigma,
+      codif_u,
+      codifdif_u,
+      mass_u,
+    }
+  }
+
+  pub fn compute_weighted(
+    topology: &Complex,
+    geometry: &MeshLengths,
+    grade: ExteriorGrade,
+    coords: &MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: &InnerProductWeightClosure,
+  ) -> Self {
+    let dim = topology.dim();
+    assert!(grade <= dim);
+
+    let mass_u = assemble_galmat_coord_aware(
+      topology,
+      geometry,
+      HodgeMassElmat::new_weighted(dim, grade, coords, qr.clone(), weight),
+    );
+    let mass_u_csr = CsrMatrix::from(&mass_u);
+
+    let (mass_sigma, dif_sigma, codif_u) = if grade > 0 {
+      let mass_sigma = assemble_galmat_coord_aware(
+        topology,
+        geometry,
+        HodgeMassElmat::new_weighted(dim, grade - 1, coords, qr.clone(), weight),
+      );
+
+      let exdif_sigma = topology.exterior_derivative_operator(grade - 1);
+      let exdif_sigma = CsrMatrix::from(&exdif_sigma);
+
+      let dif_sigma = &mass_u_csr * &exdif_sigma;
+      let dif_sigma = CooMatrix::from(&dif_sigma);
+
+      let codif_u = &exdif_sigma.transpose() * &mass_u_csr;
+      let codif_u = CooMatrix::from(&codif_u);
+
+      (mass_sigma, dif_sigma, codif_u)
+    } else {
+      (GalMat::new(0, 0), GalMat::new(0, 0), GalMat::new(0, 0))
+    };
+
+    let codifdif_u = if grade < topology.dim() {
+      let mass_plus = assemble_galmat_coord_aware(
+        topology,
+        geometry,
+        HodgeMassElmat::new_weighted(dim, grade + 1, coords, qr.clone(), weight),
+      );
       let mass_plus = CsrMatrix::from(&mass_plus);
       let exdif_u = topology.exterior_derivative_operator(grade);
       let exdif_u = CsrMatrix::from(&exdif_u);
