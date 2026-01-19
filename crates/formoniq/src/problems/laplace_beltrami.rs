@@ -22,7 +22,8 @@ pub fn solve_laplace_beltrami_source<F>(
   topology: &Complex,
   geometry: &MeshLengths,
   source_galvec: GalVec,
-  boundary_data: F,
+  essential_boundary_data: F,
+  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
 ) -> Cochain
 where
   F: Fn(KSimplexIdx) -> DofCoeff,
@@ -31,7 +32,8 @@ where
     topology,
     geometry,
     source_galvec,
-    boundary_data,
+    essential_boundary_data,
+    essential_boundary_selector,
     None,
     None,
     None,
@@ -42,7 +44,8 @@ pub fn solve_laplace_beltrami_source_weighted<F>(
   topology: &Complex,
   geometry: &MeshLengths,
   source_galvec: GalVec,
-  boundary_data: F,
+  essential_boundary_data: F,
+  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
   mesh_coords: &MeshCoords,
   qr: Option<SimplexQuadRule>,
   weight: &InnerProductWeightClosure,
@@ -54,7 +57,8 @@ where
     topology,
     geometry,
     source_galvec,
-    boundary_data,
+    essential_boundary_data,
+    essential_boundary_selector,
     Some(mesh_coords),
     qr,
     Some(weight),
@@ -91,7 +95,8 @@ fn solve_laplace_beltrami_source_inner<F>(
   topology: &Complex,
   geometry: &MeshLengths,
   mut source_galvec: GalVec,
-  boundary_data: F,
+  essential_boundary_data: F,
+  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
   mesh_coords: Option<&MeshCoords>,
   qr: Option<SimplexQuadRule>,
   weight: Option<&InnerProductWeightClosure>,
@@ -113,11 +118,12 @@ where
       operators::LaplaceBeltramiElmat::new(dim),
     )
   };
-  assemble::enforce_dirichlet_bc(
+  assemble::enforce_dirichlet_bc_partial(
     topology,
-    boundary_data,
+    essential_boundary_data,
     &mut laplace_galmat,
     &mut source_galvec,
+    essential_boundary_selector,
   );
 
   let laplace = CsrMatrix::from(&laplace_galmat);

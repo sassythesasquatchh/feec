@@ -76,6 +76,33 @@ impl Complex {
     !self.boundary_facets().is_empty()
   }
 
+  pub fn boundary_subcomplex_simplices(&self, k: Dim) -> Vec<SimplexIdx> {
+    let top = self.dim();
+    if top == 0 {
+      return Vec::new();
+    }
+    if k > top - 1 {
+      return Vec::new();
+    }
+
+    let bfacets = self.boundary_facets();
+    if k == top - 1 {
+      return bfacets;
+    }
+
+    // Closure of boundary facets down to dimension k.
+    bfacets
+      .into_iter()
+      .flat_map(|f: SimplexIdx| {
+        f.handle(self)
+          .mesh_subsimps(k)
+          .map(|s| s.idx())
+          .collect::<Vec<_>>()
+      })
+      .unique()
+      .collect()
+  }
+
   /// For a d-mesh computes the boundary, which consists of facets ((d-1)-subs).
   ///
   /// The boundary facets are characterized by the fact that they

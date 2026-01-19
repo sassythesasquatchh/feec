@@ -4,15 +4,20 @@ use common::{
   linalg::nalgebra::{CooMatrix, CooMatrixExt, CsrMatrix, Matrix, Vector},
   util,
 };
-use exterior::ExteriorGrade;
+use ddf::CoordSimplexExt;
+use exterior::{field::DifferentialMultiForm, field::ExteriorField, ExteriorGrade};
 use itertools::{multizip, Itertools};
 use manifold::{
-  geometry::metric::{mesh::MeshLengths, simplex::SimplexLengths},
-  topology::{complex::Complex, simplex::Simplex},
+  geometry::{
+    coord::{mesh::MeshCoords, quadrature::SimplexQuadRule, simplex::SimplexCoords, CoordRef},
+    metric::{mesh::MeshLengths, simplex::SimplexLengths},
+    refsimp_vol,
+  },
+  topology::{complex::Complex, handle::SimplexHandle, handle::SimplexIdx, simplex::Simplex},
 };
 
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Bound};
 
 pub type GalMat = CooMatrix;
 
@@ -117,6 +122,167 @@ pub fn assemble_galvec(
   galvec
 }
 
+/// Assembly algorithm for the Galerkin Vector.
+pub fn assemble_boundary_galvec<P>(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  elvec: impl ElVecProvider,
+  boundary_selector: P,
+) -> GalVec
+where
+  P: Fn(SimplexIdx) -> bool + Sync,
+{
+  let grade = elvec.grade();
+  let nsimps = topology.skeleton(grade).len();
+
+  let entries: Vec<(usize, f64)> = topology
+    .boundary_facets()
+    .into_par_iter()
+    .filter(|fidx| boundary_selector(*fidx))
+    .flat_map(|fidx| {
+      let facet = fidx.handle(topology);
+      let geo = geometry.simplex_lengths(facet);
+      let elvec = elvec.eval(&geo, &facet);
+
+      let subs: Vec<_> = facet.mesh_subsimps(grade).collect();
+
+      let mut local_entries = Vec::new();
+      for (ilocal, &iglobal) in subs.iter().enumerate() {
+        if elvec[ilocal] != 0.0 {
+          local_entries.push((iglobal.kidx(), elvec[ilocal]));
+        }
+      }
+
+      local_entries
+    })
+    .collect();
+
+  let mut galvec = Vector::zeros(nsimps);
+  for (irow, val) in entries {
+    galvec[irow] += val;
+  }
+  galvec
+}
+
+/// Return simplices of a given grade whose barycenter satisfies a predicate.
+///
+/// Useful for partitioning boundaries by geometric location.
+pub fn boundary_simplices_where_barycenter<P>(
+  topology: &Complex,
+  coords: &MeshCoords,
+  grade: ExteriorGrade,
+  predicate: P,
+) -> Vec<SimplexIdx>
+where
+  P: Fn(CoordRef) -> bool + Sync,
+{
+  assert!(
+    grade <= topology.dim() - 1,
+    "Grade exceeds boundary dimension."
+  );
+  topology
+    .boundary_subcomplex_simplices(grade)
+    .into_par_iter()
+    .filter_map(|simp_idx| {
+      let simp = simp_idx.handle(topology);
+      let simplex_coords = SimplexCoords::from_simplex_and_coords(&simp, coords);
+      let barycenter = simplex_coords.barycenter();
+      predicate(barycenter.as_view()).then_some(simp_idx)
+    })
+    .collect()
+}
+
+/// Assemble a boundary (Neumann) Galerkin vector
+/// $\int_{\Gamma_N} \mathrm{tr}\, \omega \wedge g_N$ on a selectable subset of boundary facets.
+// pub fn assemble_boundary_galvec<G, P>(
+//   topology: &Complex,
+//   coords: &MeshCoords,
+//   test_grade: ExteriorGrade,
+//   boundary_data: &G,
+//   qr: Option<SimplexQuadRule>,
+//   boundary_selector: P,
+// ) -> GalVec
+// where
+//   G: DifferentialMultiForm + Sync,
+//   P: Fn(SimplexIdx) -> bool + Sync,
+// {
+//   let nsimps = topology.skeleton(test_grade).len();
+//   if nsimps == 0 {
+//     return Vector::zeros(0);
+//   }
+
+//   let boundary_dim = topology.dim().saturating_sub(1);
+//   assert!(
+//     test_grade <= boundary_dim,
+//     "Test form grade exceeds boundary dimension."
+//   );
+//   assert!(
+//     boundary_data.grade() + test_grade == boundary_dim,
+//     "Boundary data grade does not match (n-1 - grade(test)). Data grade: {}, test grade: {}, boundary dimension: {}",
+//     boundary_data.grade(),
+//     test_grade,
+//     boundary_dim
+//   );
+
+//   let qr = qr.unwrap_or_else(|| SimplexQuadRule::barycentric(boundary_dim));
+
+//   let entries: Vec<(usize, f64)> = topology
+//     .boundary_facets()
+//     .into_par_iter()
+//     .filter(|fidx| boundary_selector(*fidx))
+//     .flat_map(|fidx| {
+//       let facet = fidx.handle(topology);
+//       let facet_coords = SimplexCoords::from_simplex_and_coords(&facet, coords);
+//       let elvec = boundary_elvec_for_facet(test_grade, facet, &facet_coords, boundary_data, &qr);
+
+//       facet
+//         .mesh_subsimps(test_grade)
+//         .enumerate()
+//         .map(|(iloc, sub)| (sub.kidx(), elvec[iloc]))
+//         .collect::<Vec<_>>()
+//     })
+//     .collect();
+
+//   let mut galvec = Vector::zeros(nsimps);
+//   for (irow, val) in entries {
+//     galvec[irow] += val;
+//   }
+//   galvec
+// }
+
+// fn boundary_elvec_for_facet<G: DifferentialMultiForm>(
+//   test_grade: ExteriorGrade,
+//   facet: SimplexHandle,
+//   facet_coords: &SimplexCoords,
+//   boundary_data: &G,
+//   qr: &SimplexQuadRule,
+// ) -> Vector {
+//   let subs: Vec<_> = facet.mesh_subsimps(test_grade).collect();
+//   if subs.is_empty() {
+//     return Vector::zeros(0);
+//   }
+
+//   let mut elvec = Vector::zeros(subs.len());
+//   let multivector = facet_coords.spanning_multivector();
+//   let vol = refsimp_vol(facet_coords.dim_intrinsic());
+
+//   for (iloc, sub) in subs.iter().enumerate() {
+//     // Convert sub-simplex to local vertex numbering for this facet so barycentric lookup is valid.
+//     let local_sub = sub.relative_to(&*facet);
+//     let lsf = ddf::whitney::lsf::WhitneyLsf::from_coords(facet_coords.clone(), local_sub);
+//     let f = |xi: CoordRef| {
+//       let global = facet_coords.local2global(xi);
+//       let phi = lsf.at_point(global.as_view());
+//       let g = boundary_data.at_point(global.as_view());
+//       let integrand = phi.wedge(&g);
+//       integrand.apply_form_to_vector(&multivector)
+//     };
+//     elvec[iloc] = qr.integrate_local(&f, vol);
+//   }
+
+//   elvec
+// }
+
 pub fn drop_boundary_dofs_galmat(complex: &Complex, galmat: &mut GalMat) {
   drop_dofs_galmat(&complex.boundary_vertices().into_iter().collect(), galmat)
 }
@@ -169,6 +335,26 @@ pub fn enforce_homogeneous_dirichlet_bc(
   fix_dofs_zero(&complex.boundary_vertices(), galmat, galvec);
 }
 
+pub fn enforce_dirichlet_bc_partial<F>(
+  complex: &Complex,
+  boundary_coeff_map: F,
+  galmat: &mut GalMat,
+  galvec: &mut Vector,
+  boundary_selector: Option<&dyn Fn(usize) -> bool>,
+) where
+  F: Fn(DofIdx) -> f64,
+{
+  let boundary_selector = boundary_selector.unwrap_or(&|_: usize| true);
+  let boundary_dofs = complex.boundary_vertices();
+  let dof_coeffs: Vec<_> = boundary_dofs
+    .into_iter()
+    .filter(|sidx| boundary_selector(*sidx))
+    .map(|idof| (idof, boundary_coeff_map(idof)))
+    .collect();
+
+  fix_dofs_coeff(&dof_coeffs, galmat, galvec);
+}
+
 pub fn enforce_dirichlet_bc<F>(
   complex: &Complex,
   boundary_coeff_map: F,
@@ -177,12 +363,29 @@ pub fn enforce_dirichlet_bc<F>(
 ) where
   F: Fn(DofIdx) -> f64,
 {
-  let boundary_dofs = complex.boundary_vertices();
+  enforce_dirichlet_bc_partial(complex, boundary_coeff_map, galmat, galvec, None);
+}
+
+pub fn enforce_essential_bc<F>(
+  grade: ExteriorGrade,
+  complex: &Complex,
+  boundary_coeff_map: F,
+  galmat: &mut GalMat,
+  galvec: &mut Vector,
+  boundary_selector: Option<&dyn Fn(SimplexIdx) -> bool>,
+) where
+  F: Fn(DofIdx) -> f64,
+{
+  let boundary_selector = boundary_selector.unwrap_or(&|_sidx: SimplexIdx| true);
+  let boundary_dofs = complex.boundary_subcomplex_simplices(grade);
   let dof_coeffs: Vec<_> = boundary_dofs
     .into_iter()
-    .map(|idof| (idof, boundary_coeff_map(idof)))
+    .filter(|sidx| boundary_selector(*sidx))
+    .map(|simp| {
+      let idof = simp.kidx;
+      (idof, boundary_coeff_map(idof))
+    })
     .collect();
-
   fix_dofs_coeff(&dof_coeffs, galmat, galvec);
 }
 

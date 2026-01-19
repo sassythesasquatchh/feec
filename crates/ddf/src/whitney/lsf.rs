@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use crate::CoordSimplexExt;
 
 use {
@@ -78,12 +80,12 @@ impl ExteriorField for WhitneyLsf {
     //assert!(is_bary_inside(&barys), "Point is outside cell.");
 
     let dim = self.dim_ambient();
+    // let dim = self.dim_intrinsic();
     let grade = self.grade();
     let mut form = MultiForm::zero(dim, grade);
     for (iterm, &vertex) in self.dof_simp.vertices.iter().enumerate() {
       let sign = Sign::from_parity(iterm);
       let wedge = self.wedge_term(iterm);
-
       let bary = barys[vertex];
       form += sign.as_f64() * bary * wedge;
     }

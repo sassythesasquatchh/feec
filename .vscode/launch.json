@@ -1,0 +1,350 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Debug unit tests in library 'formoniq'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'curvature_flow'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=curvature_flow",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'curvature_flow'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=curvature_flow",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'darcy_flow'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=darcy_flow",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'darcy_flow'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=darcy_flow",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'electrostatic'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=electrostatic",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'electrostatic'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=electrostatic",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'hodge_laplace_evp'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=hodge_laplace_evp",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'hodge_laplace_evp'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=hodge_laplace_evp",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'hodge_laplace_source'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=hodge_laplace_source",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'hodge_laplace_source'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=hodge_laplace_source",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'magnetostatic'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=magnetostatic",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'magnetostatic'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=magnetostatic",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'mixed_bc'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=mixed_bc",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'mixed_bc'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=mixed_bc",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'poisson'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=poisson",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'poisson'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=poisson",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'sphere_wave'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=sphere_wave",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'sphere_wave'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=sphere_wave",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'spherical_harmonics'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=spherical_harmonics",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'spherical_harmonics'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=spherical_harmonics",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'fdm'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=fdm",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'fem3d'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=fem3d",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'ref_elmat'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=ref_elmat",
+                    "--package=formoniq"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'ddf'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=ddf"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'exterior'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=exterior"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'manifold'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=manifold"
+                ]
+            }
+        }
+    ]
+}
