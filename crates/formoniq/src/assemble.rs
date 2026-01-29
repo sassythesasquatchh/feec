@@ -239,7 +239,20 @@ pub fn assemble_boundary_integral_term(
       let facet = fidx.handle(topology);
       let facet_coords = SimplexCoords::from_simplex_and_coords(&facet, coords);
 
-      let elvec = boundary_elvec_for_facet(test_grade, facet, &facet_coords, boundary_data, &qr);
+      let orientation_sign = if boundary_dim == 0 {
+        1.0
+      } else {
+        boundary_orientation_sign(facet, coords)
+      };
+
+      let elvec = boundary_elvec_for_facet(
+        test_grade,
+        facet,
+        &facet_coords,
+        boundary_data,
+        &qr,
+        orientation_sign,
+      );
 
       facet
         .mesh_subsimps(test_grade)
@@ -262,6 +275,7 @@ fn boundary_elvec_for_facet(
   facet_coords: &SimplexCoords,
   boundary_data: &DiffFormClosure,
   qr: &SimplexQuadRule,
+  orientation_sign: f64,
 ) -> Vector {
   let subs: Vec<_> = facet.mesh_subsimps(test_grade).collect();
   if subs.is_empty() {
@@ -280,12 +294,35 @@ fn boundary_elvec_for_facet(
       let phi = lsf.at_point(global.as_view());
       let g = boundary_data.at_point(global.as_view());
       let integrand = phi.wedge(&g);
-      integrand.apply_form_to_vector(&multivector)
+      orientation_sign * integrand.apply_form_to_vector(&multivector)
     };
     elvec[iloc] = qr.integrate_local(&f, vol);
   }
 
   elvec
+}
+
+/// Orientation factor for an oriented boundary facet induced by its unique parent cell.
+///
+/// The factor combines
+/// - the sign of the facet in the boundary chain of its parent cell, and
+/// - the orientation of that cell with respect to the ambient coordinates.
+fn boundary_orientation_sign(facet: SimplexHandle, coords: &MeshCoords) -> f64 {
+  let parent_cell = facet
+    .cocells()
+    .next()
+    .expect("Boundary facet should have exactly one parent cell.");
+
+  let facet_sign = parent_cell
+    .boundary_chain()
+    .find_map(|(sign, subfacet)| (subfacet == facet).then_some(sign))
+    .expect("Boundary facet must appear in boundary of its parent cell.")
+    .as_f64();
+
+  let parent_coords = SimplexCoords::from_simplex_and_coords(&parent_cell, coords);
+  let cell_orientation = parent_coords.orientation().as_f64();
+
+  facet_sign * cell_orientation
 }
 
 pub fn drop_boundary_dofs_galmat(complex: &Complex, galmat: &mut GalMat) {

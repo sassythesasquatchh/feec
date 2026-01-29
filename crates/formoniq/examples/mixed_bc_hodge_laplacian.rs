@@ -108,13 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let metric = coords.to_edge_lengths(&topology);
 
   // ---------------------- Boundary Handling ----------------------
-  // let strong_dof_predicate = |p: CoordRef| p[0] == 0.0 || p[1] == 0.0 || p[2] == 0.0;
+  let strong_dof_predicate = |p: CoordRef| p[0] == 0.0 || p[1] == 0.0 || p[2] == 0.0;
 
   // let weak_dof_predicate = |p: CoordRef| p[0] == 1.0 || p[1] == 1.0 || p[2] == 1.0;
 
-  let strong_dof_predicate = |_: CoordRef| true;
+  // let strong_dof_predicate = |_: CoordRef| true;
 
-  let weak_dof_predicate = |_: CoordRef| false;
+  let weak_dof_predicate = |p: CoordRef| !strong_dof_predicate(p);
 
   // let strong_dof_predicate = |_p: CoordRef| true;
   let strong_k_dofs = formoniq::assemble::boundary_simplices_where_barycenter(

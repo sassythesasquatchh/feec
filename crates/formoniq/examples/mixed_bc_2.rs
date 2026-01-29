@@ -21,7 +21,7 @@ fn main() {
   fs::create_dir_all(path).unwrap();
 
   let dim = 2;
-  let resolution = 4;
+  let resolution = 100;
 
   let exact_solution = DiffFormClosure::scalar(
     |p| 1. + p[0] + p[1] + p[0] * p[1] + (PI * p[0]).sin() * (PI * p[1]).sin(),
@@ -48,11 +48,15 @@ fn main() {
   // TODO for efficiency, implement projection only onto dirichlet boundary
   let solution_projected = cochain_projection(&exact_solution, &topology, &coords, None);
 
+  // let strong_dof_predicate = |p: CoordRef| p[1] != 1.0 || (p[0] == 0.0 || p[0] == 1.0);
+  let strong_dof_predicate = |p: CoordRef| p[1] == 1.0;
+  let weak_dof_predicate = |p: CoordRef| !strong_dof_predicate(p);
+
   let dirichlet_dofs = formoniq::assemble::boundary_simplices_where_barycenter(
     &topology,
     &coords,
     0,
-    |p: CoordRef| p[1] != 1.0 || (p[0] == 0.0 || p[0] == 1.0),
+    strong_dof_predicate,
   )
   .into_iter()
   .collect::<HashSet<usize>>();
@@ -65,11 +69,25 @@ fn main() {
     &topology,
     &coords,
     1,
-    |p: CoordRef| p[1] == 1.0,
+    weak_dof_predicate,
   );
 
-  let neumann_data = DiffFormClosure::scalar(|p| 1. + p[0] - PI * (PI * p[0]).sin(), 1);
-
+  let neumann_data = DiffFormClosure::scalar(
+    |p| {
+      if p[0] == 0.0 {
+        -(1. + p[1] + PI * (PI * p[1]).sin())
+      } else if p[0] == 1.0 {
+        1. + p[1] - PI * (PI * p[1]).sin()
+      } else if p[1] == 0.0 {
+        -(1. + p[0] + PI * (PI * p[0]).sin())
+      } else if p[1] == 1.0 {
+        1. + p[0] - PI * (PI * p[0]).sin()
+      } else {
+        0.0
+      }
+    },
+    1,
+  );
   let neumann_dof_selector =
     |kidx: manifold::topology::handle::KSimplexIdx| neumann_dofs.contains(&kidx);
 
@@ -83,8 +101,8 @@ fn main() {
   let neumann_one_form_data = DiffFormClosure::one_form(
     |p| {
       Vector::from_column_slice(&[
-        -(1. + p[0] + PI * (PI * p[1].cos()) * (PI * p[0]).sin()),
-        (1. + p[1] + PI * (PI * p[0].cos()) * (PI * p[1]).sin()),
+        -(1. + p[0] + PI * (PI * p[0]).sin() * (PI * p[1]).cos()),
+        (1. + p[1] + PI * (PI * p[0]).cos() * (PI * p[1]).sin()),
       ])
     },
     2,
@@ -99,8 +117,12 @@ fn main() {
     &neumann_dof_selector,
   );
 
-  println!("neumann_rhs: {:?}", neumann_rhs);
-  println!("neumann_rhs_2: {:?}", neumann_rhs_2);
+  // let neumann_rhs_formatted: Vec<String> =
+  //   neumann_rhs.iter().map(|x| format!("{:.3e}", x)).collect();
+  // let neumann_rhs_2_formatted: Vec<String> =
+  //   neumann_rhs_2.iter().map(|x| format!("{:.3e}", x)).collect();
+  // println!("neumann_rhs: {:?}", neumann_rhs_formatted);
+  // println!("neumann_rhs_2: {:?}", neumann_rhs_2_formatted);
 
   assert!(
     (neumann_rhs.clone() - neumann_rhs_2.clone())
