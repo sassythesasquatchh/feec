@@ -548,6 +548,53 @@ pub fn fix_dofs_coeff(dof_coeffs: &[(DofIdx, f64)], galmat: &mut GalMat, galvec:
   }
 }
 
+/// Enforce periodic boundary conditions by constraining slave dofs to master dofs.
+///
+/// Each pair is `(slave, master)` and enforces `u_slave = u_master`.
+pub fn enforce_periodic_bc_pairs(
+  galmat: &mut GalMat,
+  galvec: &mut Vector,
+  pairs: &[(DofIdx, DofIdx)],
+) {
+  if pairs.is_empty() {
+    return;
+  }
+
+  let nrows = galmat.nrows();
+  let ncols = galmat.ncols();
+  let empty = GalMat::zeros(nrows, ncols);
+  let (mut rows, mut cols, mut vals) = std::mem::replace(galmat, empty).disassemble();
+
+  for &(slave, master) in pairs {
+    for col in cols.iter_mut() {
+      if *col == slave {
+        *col = master;
+      }
+    }
+
+    let mut i = 0;
+    while i < rows.len() {
+      if rows[i] == slave {
+        rows.swap_remove(i);
+        cols.swap_remove(i);
+        vals.swap_remove(i);
+      } else {
+        i += 1;
+      }
+    }
+
+    rows.push(slave);
+    cols.push(slave);
+    vals.push(1.0);
+    rows.push(slave);
+    cols.push(master);
+    vals.push(-1.0);
+    galvec[slave] = 0.0;
+  }
+
+  *galmat = GalMat::try_from_triplets(nrows, ncols, rows, cols, vals).unwrap();
+}
+
 /// $mat(A_0, A_(0 diff); 0, I) vec(mu_0, mu_diff) = vec(phi, gamma)$
 //#[allow(unused_variables, unreachable_code)]
 pub fn fix_dofs_coeff_alt(dof_coeffs: &[(DofIdx, f64)], galmat: &mut GalMat, galvec: &mut Vector) {
