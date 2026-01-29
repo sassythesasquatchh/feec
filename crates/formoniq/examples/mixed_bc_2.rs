@@ -10,24 +10,32 @@ use manifold::{
   geometry::coord::CoordRef,
   io::{save_coords_to_file, save_skeleton_to_file},
 };
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::{fs, io::Write};
 
 fn main() {
   tracing_subscriber::fmt::init();
-  let path = "out/examples/mixed_bc";
+  let path = "out/examples/mixed_bc_2";
   let _ = fs::remove_dir_all(path);
   fs::create_dir_all(path).unwrap();
 
   let dim = 2;
+  let resolution = 4;
 
-  let exact_solution = DiffFormClosure::scalar(|p| (PI * p[0]).sin() * p[1], dim);
+  let exact_solution = DiffFormClosure::scalar(
+    |p| 1. + p[0] + p[1] + p[0] * p[1] + (PI * p[0]).sin() * (PI * p[1]).sin(),
+    dim,
+  );
 
-  let rhs = DiffFormClosure::scalar(|p| PI * PI * p[1] * (PI * p[0]).sin(), dim);
+  let rhs = DiffFormClosure::scalar(
+    |p| 2. * PI * PI * (PI * p[1]).sin() * (PI * p[0]).sin(),
+    dim,
+  );
 
   let inner_product_weight = InnerProductWeightClosure::new(|_p| 1.0);
 
-  let box_mesh = CartesianMeshInfo::new_unit_scaled(dim, 100, 1.);
+  let box_mesh = CartesianMeshInfo::new_unit_scaled(dim, resolution, 1.);
   let (topology, coords) = box_mesh.compute_coord_complex();
   let metric = coords.to_edge_lengths(&topology);
 
@@ -47,7 +55,7 @@ fn main() {
     |p: CoordRef| p[1] != 1.0 || (p[0] == 0.0 || p[0] == 1.0),
   )
   .into_iter()
-  .collect::<Vec<usize>>();
+  .collect::<HashSet<usize>>();
 
   let dirichlet_dof_selector = |sidx: usize| dirichlet_dofs.contains(&sidx);
   let dirichlet_boundary_data = |vidx: usize| solution_projected[vidx];
@@ -60,7 +68,7 @@ fn main() {
     |p: CoordRef| p[1] == 1.0,
   );
 
-  let neumann_data = DiffFormClosure::scalar(|p| (PI * p[0]).sin(), 1);
+  let neumann_data = DiffFormClosure::scalar(|p| 1. + p[0] - PI * (PI * p[0]).sin(), 1);
 
   let neumann_dof_selector =
     |kidx: manifold::topology::handle::KSimplexIdx| neumann_dofs.contains(&kidx);
@@ -72,7 +80,34 @@ fn main() {
     neumann_dof_selector,
   );
 
-  // println!("Neumann RHS: {:?}", neumann_rhs);
+  let neumann_one_form_data = DiffFormClosure::one_form(
+    |p| {
+      Vector::from_column_slice(&[
+        -(1. + p[0] + PI * (PI * p[1].cos()) * (PI * p[0]).sin()),
+        (1. + p[1] + PI * (PI * p[0].cos()) * (PI * p[1]).sin()),
+      ])
+    },
+    2,
+  );
+
+  let neumann_rhs_2 = formoniq::assemble::assemble_boundary_integral_term(
+    &topology,
+    &coords,
+    0,
+    &neumann_one_form_data,
+    None,
+    &neumann_dof_selector,
+  );
+
+  println!("neumann_rhs: {:?}", neumann_rhs);
+  println!("neumann_rhs_2: {:?}", neumann_rhs_2);
+
+  assert!(
+    (neumann_rhs.clone() - neumann_rhs_2.clone())
+      .iter()
+      .all(|x| x.abs() < 1e-10),
+    "neumann_rhs and neumann_rhs_2 differ by more than floating point error"
+  );
 
   let total_rhs = rhs_vec + neumann_rhs;
 

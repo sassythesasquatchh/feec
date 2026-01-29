@@ -91,6 +91,14 @@ impl ExteriorElement {
     assert_eq!(self.dim, other.dim);
     let dim = self.dim;
 
+    // Scalars wedge anything => scalar multiplication.
+    if self.grade == 0 {
+      return other.clone() * self.coeffs[0];
+    }
+    if other.grade == 0 {
+      return self.clone() * other.coeffs[0];
+    }
+
     let new_grade = self.grade + other.grade;
     if new_grade > dim {
       return Self::zero(dim, 0);

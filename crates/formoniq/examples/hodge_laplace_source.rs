@@ -1,3 +1,5 @@
+use ddf::cochain::cochain_projection;
+
 use {
   common::{linalg::nalgebra::Vector, util::algebraic_convergence_rate},
   exterior::{field::DiffFormClosure, ExteriorElement},
@@ -18,7 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let grade = 1;
   let homology_dim = 0;
 
-  for dim in 2_usize..=3 {
+  // for dim in 2_usize..=3 {
+  for dim in 3_usize..=3 {
     println!("Solving Hodge-Laplace in {dim}d.");
 
     let solution_exact = DiffFormClosure::one_form(
@@ -111,6 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
           .map(|&prev| algebraic_convergence_rate(curr, prev))
           .unwrap_or(f64::INFINITY)
       };
+
+      let u_projected = cochain_projection(&solution_exact, &topology, &coords, None);
 
       let error_l2 = fe_l2_error(&galsol, &solution_exact, &topology, &coords);
       let conv_rate_l2 = conv_rate(&errors_l2, error_l2);

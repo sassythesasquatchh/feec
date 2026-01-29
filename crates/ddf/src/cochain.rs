@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use common::linalg::nalgebra::{CsrMatrix, Vector};
 use manifold::{
   geometry::{
     coord::{mesh::MeshCoords, quadrature::SimplexQuadRule},
     refsimp_vol,
   },
-  topology::skeleton::Skeleton,
+  topology::{handle::KSimplexIdx, skeleton::Skeleton},
 };
 
 use crate::{CoordSimplexExt, ManifoldComplexExt};
@@ -159,7 +161,29 @@ pub fn cochain_projection(
   Cochain::new(form.grade(), cochain)
 }
 
-/// Approximates the integral of a differential k-form over a k-simplex.
+// Useful for Dirichlet boundary conditions
+pub fn partial_cochain_projection(
+  form: &impl DifferentialMultiForm,
+  topology: &Complex,
+  coords: &MeshCoords,
+  simplex_predicate: &dyn Fn(KSimplexIdx) -> bool,
+  qr: Option<&SimplexQuadRule>,
+) -> HashMap<KSimplexIdx, f64> {
+  let cochain = topology
+    .skeleton(form.grade())
+    .handle_iter()
+    .filter(|simp| simplex_predicate(simp.kidx()))
+    .map(|simp| {
+      (
+        simp.kidx(),
+        SimplexCoords::from_simplex_and_coords(&simp, coords),
+      )
+    })
+    .map(|(kidx, simp)| (kidx, integrate_form_simplex(form, &simp, qr)))
+    .collect::<HashMap<_, _>>();
+  cochain
+}
+
 pub fn integrate_form_simplex(
   form: &impl DifferentialMultiForm,
   simplex: &SimplexCoords,

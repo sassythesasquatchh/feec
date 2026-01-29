@@ -1,5 +1,3 @@
-use std::io::{self, Write};
-
 use crate::CoordSimplexExt;
 
 use {
@@ -42,12 +40,20 @@ impl WhitneyLsf {
 
   /// d𝜆_i_0 ∧⋯∧̂ omit(d𝜆_i_iwedge) ∧⋯∧ d𝜆_i_dim
   pub fn wedge_term(&self, iterm: usize) -> MultiForm {
-    let dim_cell = self.cell_coords.dim_intrinsic();
+    // let dim_cell = self.cell_coords.dim_intrinsic();
+    let dim_cell = self.dim_ambient();
     let wedge = self
       .difbarys()
       .enumerate()
       // leave off i'th difbary
       .filter_map(|(pos, difbary)| (pos != iterm).then_some(difbary));
+
+    // let test = MultiForm::wedge_big(wedge);
+    // let test2 = match test {
+    // Some(form) => form,
+    // None => MultiForm::one(dim_cell),
+    // };
+    // test2
     MultiForm::wedge_big(wedge).unwrap_or(MultiForm::one(dim_cell))
   }
   pub fn wedge_terms(&self) -> impl ExactSizeIterator<Item = MultiForm> + use<'_> {

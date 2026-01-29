@@ -5,19 +5,28 @@ use common::{
   util,
 };
 use ddf::CoordSimplexExt;
-use exterior::{field::DifferentialMultiForm, field::ExteriorField, ExteriorGrade};
-use itertools::{multizip, Itertools};
+use exterior::{
+  field::{DiffFormClosure, ExteriorField},
+  ExteriorGrade,
+};
+use itertools::Itertools;
 use manifold::{
   geometry::{
     coord::{mesh::MeshCoords, quadrature::SimplexQuadRule, simplex::SimplexCoords, CoordRef},
     metric::{mesh::MeshLengths, simplex::SimplexLengths},
     refsimp_vol,
   },
-  topology::{complex::Complex, handle::SimplexHandle, handle::SimplexIdx, simplex::Simplex},
+  topology::{
+    complex::Complex,
+    handle::{KSimplexIdx, SimplexHandle, SimplexIdx},
+    simplex::Simplex,
+  },
+  Dim,
 };
 
+use itertools::izip;
 use rayon::prelude::*;
-use std::{collections::HashSet, ops::Bound};
+use std::collections::HashSet;
 
 pub type GalMat = CooMatrix;
 
@@ -130,7 +139,7 @@ pub fn assemble_boundary_galvec<P>(
   boundary_selector: P,
 ) -> GalVec
 where
-  P: Fn(SimplexIdx) -> bool + Sync,
+  P: Fn(KSimplexIdx) -> bool + Sync,
 {
   let grade = elvec.grade();
   let nsimps = topology.skeleton(grade).len();
@@ -138,7 +147,7 @@ where
   let entries: Vec<(usize, f64)> = topology
     .boundary_facets()
     .into_par_iter()
-    .filter(|fidx| boundary_selector(*fidx))
+    .filter(|fidx| boundary_selector(fidx.kidx))
     .flat_map(|fidx| {
       let facet = fidx.handle(topology);
       let geo = geometry.simplex_lengths(facet);
@@ -170,142 +179,192 @@ where
 pub fn boundary_simplices_where_barycenter<P>(
   topology: &Complex,
   coords: &MeshCoords,
-  grade: ExteriorGrade,
+  dim: Dim,
   predicate: P,
-) -> Vec<SimplexIdx>
+) -> Vec<KSimplexIdx>
 where
   P: Fn(CoordRef) -> bool + Sync,
 {
   assert!(
-    grade <= topology.dim() - 1,
-    "Grade exceeds boundary dimension."
+    dim <= topology.dim() - 1,
+    "Simplex dimension exceeds boundary dimension."
   );
   topology
-    .boundary_subcomplex_simplices(grade)
+    .boundary_subcomplex_simplices(dim)
     .into_par_iter()
     .filter_map(|simp_idx| {
       let simp = simp_idx.handle(topology);
       let simplex_coords = SimplexCoords::from_simplex_and_coords(&simp, coords);
       let barycenter = simplex_coords.barycenter();
-      predicate(barycenter.as_view()).then_some(simp_idx)
+      predicate(barycenter.as_view()).then_some(simp_idx.kidx)
     })
     .collect()
 }
+// Assemble a boundary (Neumann) Galerkin vector
+// $\int_{\Gamma_N} \mathrm{tr}\, \omega \wedge g_N$ on a selectable subset of boundary facets.
+pub fn assemble_boundary_integral_term(
+  topology: &Complex,
+  coords: &MeshCoords,
+  test_grade: ExteriorGrade,
+  boundary_data: &DiffFormClosure,
+  qr: Option<SimplexQuadRule>,
+  boundary_selector: &dyn Fn(KSimplexIdx) -> bool,
+) -> GalVec {
+  let nsimps = topology.skeleton(test_grade).len();
+  if nsimps == 0 {
+    return Vector::zeros(0);
+  }
 
-/// Assemble a boundary (Neumann) Galerkin vector
-/// $\int_{\Gamma_N} \mathrm{tr}\, \omega \wedge g_N$ on a selectable subset of boundary facets.
-// pub fn assemble_boundary_galvec<G, P>(
-//   topology: &Complex,
-//   coords: &MeshCoords,
-//   test_grade: ExteriorGrade,
-//   boundary_data: &G,
-//   qr: Option<SimplexQuadRule>,
-//   boundary_selector: P,
-// ) -> GalVec
-// where
-//   G: DifferentialMultiForm + Sync,
-//   P: Fn(SimplexIdx) -> bool + Sync,
-// {
-//   let nsimps = topology.skeleton(test_grade).len();
-//   if nsimps == 0 {
-//     return Vector::zeros(0);
-//   }
+  let boundary_dim = topology.dim().saturating_sub(1);
+  assert!(
+    test_grade <= boundary_dim,
+    "Test form grade exceeds boundary dimension."
+  );
+  assert!(
+    boundary_data.grade() + test_grade == boundary_dim,
+    "Boundary data grade does not match (n-1 - grade(test)). Data grade: {}, test grade: {}, boundary dimension: {}",
+    boundary_data.grade(),
+    test_grade,
+    boundary_dim
+  );
 
-//   let boundary_dim = topology.dim().saturating_sub(1);
-//   assert!(
-//     test_grade <= boundary_dim,
-//     "Test form grade exceeds boundary dimension."
-//   );
-//   assert!(
-//     boundary_data.grade() + test_grade == boundary_dim,
-//     "Boundary data grade does not match (n-1 - grade(test)). Data grade: {}, test grade: {}, boundary dimension: {}",
-//     boundary_data.grade(),
-//     test_grade,
-//     boundary_dim
-//   );
+  let qr = qr.unwrap_or_else(|| SimplexQuadRule::barycentric(boundary_dim));
 
-//   let qr = qr.unwrap_or_else(|| SimplexQuadRule::barycentric(boundary_dim));
+  // TODO make safe for parallel execution
+  let entries: Vec<(usize, f64)> = topology
+    .boundary_facets()
+    .into_iter()
+    .filter(|fidx| boundary_selector(fidx.kidx))
+    .flat_map(|fidx| {
+      let facet = fidx.handle(topology);
+      let facet_coords = SimplexCoords::from_simplex_and_coords(&facet, coords);
 
-//   let entries: Vec<(usize, f64)> = topology
-//     .boundary_facets()
-//     .into_par_iter()
-//     .filter(|fidx| boundary_selector(*fidx))
-//     .flat_map(|fidx| {
-//       let facet = fidx.handle(topology);
-//       let facet_coords = SimplexCoords::from_simplex_and_coords(&facet, coords);
-//       let elvec = boundary_elvec_for_facet(test_grade, facet, &facet_coords, boundary_data, &qr);
+      let elvec = boundary_elvec_for_facet(test_grade, facet, &facet_coords, boundary_data, &qr);
 
-//       facet
-//         .mesh_subsimps(test_grade)
-//         .enumerate()
-//         .map(|(iloc, sub)| (sub.kidx(), elvec[iloc]))
-//         .collect::<Vec<_>>()
-//     })
-//     .collect();
+      facet
+        .mesh_subsimps(test_grade)
+        .enumerate()
+        .map(|(iloc, sub)| (sub.kidx(), elvec[iloc]))
+        .collect::<Vec<_>>()
+    })
+    .collect();
 
-//   let mut galvec = Vector::zeros(nsimps);
-//   for (irow, val) in entries {
-//     galvec[irow] += val;
-//   }
-//   galvec
-// }
+  let mut galvec = Vector::zeros(nsimps);
+  for (irow, val) in entries {
+    galvec[irow] += val;
+  }
+  galvec
+}
 
-// fn boundary_elvec_for_facet<G: DifferentialMultiForm>(
-//   test_grade: ExteriorGrade,
-//   facet: SimplexHandle,
-//   facet_coords: &SimplexCoords,
-//   boundary_data: &G,
-//   qr: &SimplexQuadRule,
-// ) -> Vector {
-//   let subs: Vec<_> = facet.mesh_subsimps(test_grade).collect();
-//   if subs.is_empty() {
-//     return Vector::zeros(0);
-//   }
+fn boundary_elvec_for_facet(
+  test_grade: ExteriorGrade,
+  facet: SimplexHandle,
+  facet_coords: &SimplexCoords,
+  boundary_data: &DiffFormClosure,
+  qr: &SimplexQuadRule,
+) -> Vector {
+  let subs: Vec<_> = facet.mesh_subsimps(test_grade).collect();
+  if subs.is_empty() {
+    return Vector::zeros(0);
+  }
 
-//   let mut elvec = Vector::zeros(subs.len());
-//   let multivector = facet_coords.spanning_multivector();
-//   let vol = refsimp_vol(facet_coords.dim_intrinsic());
+  let mut elvec = Vector::zeros(subs.len());
+  let multivector = facet_coords.spanning_multivector();
+  let vol = refsimp_vol(facet_coords.dim_intrinsic());
 
-//   for (iloc, sub) in subs.iter().enumerate() {
-//     // Convert sub-simplex to local vertex numbering for this facet so barycentric lookup is valid.
-//     let local_sub = sub.relative_to(&*facet);
-//     let lsf = ddf::whitney::lsf::WhitneyLsf::from_coords(facet_coords.clone(), local_sub);
-//     let f = |xi: CoordRef| {
-//       let global = facet_coords.local2global(xi);
-//       let phi = lsf.at_point(global.as_view());
-//       let g = boundary_data.at_point(global.as_view());
-//       let integrand = phi.wedge(&g);
-//       integrand.apply_form_to_vector(&multivector)
-//     };
-//     elvec[iloc] = qr.integrate_local(&f, vol);
-//   }
+  for (iloc, sub) in subs.iter().enumerate() {
+    let local_sub = sub.relative_to(&*facet);
+    let lsf = ddf::whitney::lsf::WhitneyLsf::from_coords(facet_coords.clone(), local_sub);
+    let f = |xi: CoordRef| {
+      let global = facet_coords.local2global(xi);
+      let phi = lsf.at_point(global.as_view());
+      let g = boundary_data.at_point(global.as_view());
+      let integrand = phi.wedge(&g);
+      integrand.apply_form_to_vector(&multivector)
+    };
+    elvec[iloc] = qr.integrate_local(&f, vol);
+  }
 
-//   elvec
-// }
+  elvec
+}
 
 pub fn drop_boundary_dofs_galmat(complex: &Complex, galmat: &mut GalMat) {
   drop_dofs_galmat(&complex.boundary_vertices().into_iter().collect(), galmat)
 }
 
-pub fn drop_dofs_galmat(dofs: &HashSet<DofIdx>, galmat: &mut GalMat) {
-  assert!(galmat.nrows() == galmat.ncols());
-  let ndofs_old = galmat.ncols();
-  let ndofs_new = ndofs_old - dofs.len();
+// Build old-index -> new-index map (None if dropped).
+fn build_index_map(n_old: usize, drop: &HashSet<usize>) -> Vec<Option<usize>> {
+  let mut map = vec![None; n_old];
+  let mut next = 0usize;
+  for i in 0..n_old {
+    if !drop.contains(&i) {
+      map[i] = Some(next);
+      next += 1;
+    }
+  }
+  map
+}
+
+pub fn drop_dofs_rectangular_galmat(
+  drop_rows: &HashSet<usize>,
+  drop_cols: &HashSet<usize>,
+  galmat: &mut GalMat,
+) {
+  let nrows_old = galmat.nrows();
+  let ncols_old = galmat.ncols();
+
+  assert!(drop_rows.len() <= nrows_old);
+  assert!(drop_cols.len() <= ncols_old);
+  assert!(drop_rows.iter().all(|&r| r < nrows_old));
+  assert!(drop_cols.iter().all(|&c| c < ncols_old));
+
+  let nrows_new = nrows_old - drop_rows.len();
+  let ncols_new = ncols_old - drop_cols.len();
+
+  let row_map = build_index_map(nrows_old, drop_rows);
+  let col_map = build_index_map(ncols_old, drop_cols);
 
   let (rows, cols, values) = std::mem::replace(galmat, GalMat::new(0, 0)).disassemble();
+  let nnz_old = values.len();
 
-  let (rows, cols, values): (Vec<_>, Vec<_>, Vec<_>) = multizip((rows, cols, values))
-    .filter(|(r, c, _)| !dofs.contains(r) && !dofs.contains(c))
-    .map(|(mut r, mut c, v)| {
-      let diffr = dofs.iter().filter(|&&idof| idof < r).count();
-      let diffc = dofs.iter().filter(|&&idof| idof < c).count();
-      r -= diffr;
-      c -= diffc;
-      (r, c, v)
-    })
-    .multiunzip();
+  let mut new_rows = Vec::with_capacity(nnz_old);
+  let mut new_cols = Vec::with_capacity(nnz_old);
+  let mut new_vals = Vec::with_capacity(nnz_old);
 
-  *galmat = GalMat::try_from_triplets(ndofs_new, ndofs_new, rows, cols, values).unwrap();
+  for (r, c, v) in izip!(rows, cols, values) {
+    if let (Some(r2), Some(c2)) = (row_map[r], col_map[c]) {
+      new_rows.push(r2);
+      new_cols.push(c2);
+      new_vals.push(v);
+    }
+  }
+
+  *galmat = GalMat::try_from_triplets(nrows_new, ncols_new, new_rows, new_cols, new_vals).unwrap();
+}
+
+// pub fn drop_dofs_galmat(dofs: &HashSet<DofIdx>, galmat: &mut GalMat) {
+//   assert!(galmat.nrows() == galmat.ncols());
+//   let ndofs_old = galmat.ncols();
+//   let ndofs_new = ndofs_old - dofs.len();
+
+//   let (rows, cols, values) = std::mem::replace(galmat, GalMat::new(0, 0)).disassemble();
+
+//   let (rows, cols, values): (Vec<_>, Vec<_>, Vec<_>) = multizip((rows, cols, values))
+//     .filter(|(r, c, _)| !dofs.contains(r) && !dofs.contains(c))
+//     .map(|(mut r, mut c, v)| {
+//       let diffr = dofs.iter().filter(|&&idof| idof < r).count();
+//       let diffc = dofs.iter().filter(|&&idof| idof < c).count();
+//       r -= diffr;
+//       c -= diffc;
+//       (r, c, v)
+//     })
+//     .multiunzip();
+
+//   *galmat = GalMat::try_from_triplets(ndofs_new, ndofs_new, rows, cols, values).unwrap();
+// }
+
+pub fn drop_dofs_galmat(dofs: &HashSet<usize>, galmat: &mut GalMat) {
+  drop_dofs_rectangular_galmat(dofs, dofs, galmat);
 }
 
 pub fn drop_dofs_galvec(dofs: &[DofIdx], galvec: &mut GalVec) {
@@ -325,6 +384,31 @@ pub fn reintroduce_dropped_dofs_galsols(mut dofs: Vec<DofIdx>, galsols: &mut Mat
     galsol_owned = galsol_owned.insert_row(dof, 0.0);
   }
   *galsols = galsol_owned;
+}
+
+pub fn reintroduce_non_homogenous_dofs_galsols(dof_coeffs: &[(DofIdx, f64)], galsols: &mut Vector) {
+  let mut pairs: Vec<(DofIdx, f64)> = dof_coeffs
+    .iter()
+    .map(|(dof, coeff)| (*dof, *coeff))
+    .collect();
+
+  // Sort by dof index
+  pairs.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+
+  let initial_len = pairs.len();
+  pairs.dedup_by(|(a, _), (b, _)| a == b);
+  let deduped_len = pairs.len();
+  assert!(
+    deduped_len == initial_len,
+    "Duplicate dof indices found in reintroduction of non-homogeneous dofs."
+  );
+
+  // Insert rows with the provided coefficient
+  let mut owned = std::mem::take(galsols);
+  for (dof, coeff) in pairs {
+    owned = owned.insert_row(dof, coeff);
+  }
+  *galsols = owned;
 }
 
 pub fn enforce_homogeneous_dirichlet_bc(
@@ -446,5 +530,95 @@ pub fn fix_dofs_coeff_alt(dof_coeffs: &[(DofIdx, f64)], galmat: &mut GalMat, gal
   // Set galvec to prescribed coefficents.
   for &(i, v) in dof_coeffs.iter() {
     galvec[i] = v
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use approx::assert_abs_diff_eq;
+  use manifold::{
+    geometry::coord::mesh::standard_coord_complex, r#gen::cartesian::CartesianMeshInfo,
+  };
+
+  #[test]
+  fn boundary_term_interval_endpoints() {
+    let (topology, coords) = standard_coord_complex(1);
+
+    let a = 2.0;
+    let b = -3.0;
+
+    let boundary_data = DiffFormClosure::scalar(
+      move |x| {
+        if (x[0]).abs() < 1e-12 {
+          a
+        } else {
+          b
+        }
+      },
+      coords.dim(),
+    );
+
+    let v = assemble_boundary_integral_term(&topology, &coords, 0, &boundary_data, None, &|_| true);
+
+    assert_eq!(v.len(), 2);
+    assert_abs_diff_eq!(v[0], a, epsilon = 1e-12);
+    assert_abs_diff_eq!(v[1], b, epsilon = 1e-12);
+  }
+
+  #[test]
+  fn boundary_term_single_edge_whitney_integral_is_one() {
+    let (topology, coords) = standard_coord_complex(2);
+
+    let g = DiffFormClosure::scalar(|_| 1.0, coords.dim());
+
+    let target_edge_kidx = topology.boundary_facets()[0].kidx;
+
+    let v = assemble_boundary_integral_term(&topology, &coords, 1, &g, None, &|facet_kidx| {
+      facet_kidx == target_edge_kidx
+    });
+
+    let val = v[target_edge_kidx];
+
+    assert_abs_diff_eq!(val.abs(), 1.0, epsilon = 1e-10);
+    for (idx, entry) in v.iter().enumerate() {
+      if idx != target_edge_kidx {
+        assert_abs_diff_eq!(*entry, 0.0, epsilon = 1e-12);
+      }
+    }
+  }
+
+  #[test]
+  fn boundary_term_vertex_hat_integral_edge_length_half() {
+    let (topology, coords) = standard_coord_complex(2);
+
+    let target_edge_kidx = topology.boundary_facets()[0].kidx;
+    let edge = topology.edges().handle_by_kidx(target_edge_kidx);
+    let [v0_idx, v1_idx]: [usize; 2] = (*edge).clone().try_into().unwrap();
+
+    let p0 = coords.coord(v0_idx);
+    let p1 = coords.coord(v1_idx);
+    let tangent = p1 - p0;
+    let edge_length = tangent.norm();
+    let unit_tangent = tangent / edge_length;
+
+    let unit_tangent_clone = unit_tangent.clone_owned();
+    let boundary_data =
+      DiffFormClosure::one_form(move |_| unit_tangent_clone.clone(), coords.dim());
+
+    let v =
+      assemble_boundary_integral_term(&topology, &coords, 0, &boundary_data, None, &|facet_kidx| {
+        facet_kidx == target_edge_kidx
+      });
+
+    assert_eq!(v.len(), topology.skeleton(0).len());
+    assert_abs_diff_eq!(v[v0_idx], edge_length / 2.0, epsilon = 1e-10);
+    assert_abs_diff_eq!(v[v1_idx], edge_length / 2.0, epsilon = 1e-10);
+
+    for (idx, entry) in v.iter().enumerate() {
+      if idx != v0_idx && idx != v1_idx {
+        assert_abs_diff_eq!(*entry, 0.0, epsilon = 1e-12);
+      }
+    }
   }
 }

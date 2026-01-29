@@ -1,5 +1,5 @@
 use super::{
-  handle::{SimplexIdx, SkeletonHandle},
+  handle::{KSimplexIdx, SimplexIdx, SkeletonHandle},
   simplex::Simplex,
   skeleton::Skeleton,
 };
@@ -144,7 +144,7 @@ impl Complex {
       .collect()
   }
 
-  /// $diff^k: Delta_k -> Delta_(k-1)$
+  /// $boundary^k: Delta_k -> Delta_(k-1)$
   pub fn boundary_operator(&self, dim: Dim) -> CooMatrix {
     let sups = &self.skeleton(dim);
 
@@ -165,6 +165,72 @@ impl Complex {
     mat
   }
 
+  pub fn restricted_boundary_operator(
+    &self,
+    k: Dim,
+    k_minus_one_strong_dof_predicate: &dyn Fn(KSimplexIdx) -> bool,
+    k_strong_dof_predicate: &dyn Fn(KSimplexIdx) -> bool,
+  ) -> CooMatrix {
+    let sups = &self.skeleton(k);
+
+    // Map k-simplex index in full basis -> index in reduced basis
+    let mut col_of_full: Vec<Option<usize>> = vec![None; sups.len()];
+    let mut ncols = 0usize;
+    for sup in sups.handle_iter() {
+      let full_idx: KSimplexIdx = sup.kidx(); // full-basis index
+      debug_assert!(full_idx < sups.len());
+
+      if !k_strong_dof_predicate(full_idx) {
+        col_of_full[full_idx] = Some(ncols);
+        ncols += 1;
+      }
+    }
+
+    if k == 0 {
+      return CooMatrix::zeros(0, ncols);
+    }
+
+    let subs = &self.skeleton(k - 1);
+
+    // Map (k-1)-simplex index in full basis -> index in reduced basis
+    let mut row_of_full: Vec<Option<usize>> = vec![None; subs.len()];
+    let mut nrows = 0usize;
+    for sub in subs.handle_iter() {
+      let full_idx: KSimplexIdx = sub.kidx();
+      debug_assert!(full_idx < subs.len());
+
+      if !k_minus_one_strong_dof_predicate(full_idx) {
+        row_of_full[full_idx] = Some(nrows);
+        nrows += 1;
+      }
+    }
+
+    let mut mat = CooMatrix::zeros(nrows, ncols);
+
+    // Assemble using reduced row/col indices.
+    for sup in sups.handle_iter() {
+      let full_sup: KSimplexIdx = sup.kidx();
+      let full_sup_u: usize = full_sup as usize; // adjust if needed
+      let Some(col) = col_of_full[full_sup_u] else {
+        continue;
+      };
+
+      for face in sup.boundary() {
+        let full_sub: KSimplexIdx = subs.handle_by_simplex(&face.simplex).kidx();
+        let full_sub_u: usize = full_sub as usize; // adjust if needed
+        debug_assert!(full_sub_u < subs.len());
+
+        let Some(row) = row_of_full[full_sub_u] else {
+          continue;
+        };
+
+        mat.push(row, col, face.sign.as_f64());
+      }
+    }
+
+    mat
+  }
+
   /// Dimension of the k-th homology group.
   ///
   /// k-th Betti number.
@@ -182,6 +248,36 @@ impl Complex {
 
     let dim_cycles = dim_kernel(&boundary_this);
     let dim_boundaries = dim_image(&boundary_plus);
+
+    dim_cycles - dim_boundaries
+  }
+
+  pub fn relative_homology_dim(
+    &self,
+    k: Dim,
+    k_minus_one_strong_dof_predicate: &dyn Fn(KSimplexIdx) -> bool,
+    k_strong_dof_predicate: &dyn Fn(KSimplexIdx) -> bool,
+    k_plus_one_strong_dof_predicate: &dyn Fn(KSimplexIdx) -> bool,
+  ) -> usize {
+    // TODO: use sparse matrix!
+    let boundary_k = Matrix::from(&self.restricted_boundary_operator(
+      k,
+      k_minus_one_strong_dof_predicate,
+      k_strong_dof_predicate,
+    ));
+    let boundary_k_plus_one = Matrix::from(&self.restricted_boundary_operator(
+      k + 1,
+      k_strong_dof_predicate,
+      k_plus_one_strong_dof_predicate,
+    ));
+
+    const RANK_TOL: f64 = 1e-12;
+
+    let dim_image = |op: &Matrix| -> usize { op.rank(RANK_TOL) };
+    let dim_kernel = |op: &Matrix| -> usize { op.ncols() - dim_image(op) };
+
+    let dim_cycles = dim_kernel(&boundary_k);
+    let dim_boundaries = dim_image(&boundary_k_plus_one);
 
     dim_cycles - dim_boundaries
   }

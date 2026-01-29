@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::{
   fs::File,
   io::{BufReader, BufWriter, Write},
@@ -116,8 +117,13 @@ pub fn petsc_read_eigenvecs(filename: &str) -> std::io::Result<nalgebra::DMatrix
 }
 
 pub fn petsc_ghiep(lhs: &CsrMatrix, rhs: &CsrMatrix, neigen_values: usize) -> (Vector, Matrix) {
-  petsc_write_matrix(lhs, &format!("{PETSC_SOLVER_PATH}/in/A.bin")).unwrap();
-  petsc_write_matrix(rhs, &format!("{PETSC_SOLVER_PATH}/in/B.bin")).unwrap();
+  let path = Path::new(PETSC_SOLVER_PATH).join("in");
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+
+  petsc_write_matrix(lhs, path.join("A.bin").to_str().unwrap()).unwrap();
+  petsc_write_matrix(rhs, path.join("B.bin").to_str().unwrap()).unwrap();
 
   let binary = "./ghiep.out";
   #[rustfmt::skip]
@@ -143,8 +149,30 @@ pub fn petsc_ghiep(lhs: &CsrMatrix, rhs: &CsrMatrix, neigen_values: usize) -> (V
 }
 
 pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector) -> Vector {
-  petsc_write_matrix(lhs, &format!("{PETSC_SOLVER_PATH}/in/A.bin")).unwrap();
-  petsc_write_vector(rhs, &format!("{PETSC_SOLVER_PATH}/in/b.bin")).unwrap();
+  let path = Path::new(PETSC_SOLVER_PATH);
+
+  std::fs::create_dir_all(path.join("in")).unwrap_or_else(|e| {
+    panic!(
+      "create_dir_all failed for dir {:?}: {} (os error {:?})",
+      path.join("in"),
+      e,
+      e.raw_os_error()
+    )
+  });
+
+  std::fs::create_dir_all(path.join("out")).unwrap_or_else(|e| {
+    panic!(
+      "create_dir_all failed for dir {:?}: {} (os error {:?})",
+      path.join("out"),
+      e,
+      e.raw_os_error()
+    )
+  });
+
+  let in_path = path.join("in");
+
+  petsc_write_matrix(lhs, in_path.join("A.bin").to_str().unwrap()).unwrap();
+  petsc_write_vector(rhs, in_path.join("b.bin").to_str().unwrap()).unwrap();
 
   let binary = "./hils.out";
   #[rustfmt::skip]
@@ -162,5 +190,7 @@ pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector) -> Vector {
     .unwrap();
   assert!(status.success());
 
-  petsc_read_vector(&format!("{PETSC_SOLVER_PATH}/out/x.bin")).unwrap()
+  let out_path = path.join("out");
+
+  petsc_read_vector(out_path.join("x.bin").to_str().unwrap()).unwrap()
 }

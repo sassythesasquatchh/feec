@@ -23,7 +23,7 @@ pub fn solve_laplace_beltrami_source<F>(
   geometry: &MeshLengths,
   source_galvec: GalVec,
   essential_boundary_data: F,
-  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
+  essential_boundary_selector: Option<&dyn Fn(KSimplexIdx) -> bool>,
 ) -> Cochain
 where
   F: Fn(KSimplexIdx) -> DofCoeff,
@@ -45,7 +45,7 @@ pub fn solve_laplace_beltrami_source_weighted<F>(
   geometry: &MeshLengths,
   source_galvec: GalVec,
   essential_boundary_data: F,
-  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
+  essential_boundary_selector: Option<&dyn Fn(KSimplexIdx) -> bool>,
   mesh_coords: &MeshCoords,
   qr: Option<SimplexQuadRule>,
   weight: &InnerProductWeightClosure,
@@ -96,7 +96,7 @@ fn solve_laplace_beltrami_source_inner<F>(
   geometry: &MeshLengths,
   mut source_galvec: GalVec,
   essential_boundary_data: F,
-  essential_boundary_selector: Option<&dyn Fn(usize) -> bool>,
+  essential_boundary_selector: Option<&dyn Fn(KSimplexIdx) -> bool>,
   mesh_coords: Option<&MeshCoords>,
   qr: Option<SimplexQuadRule>,
   weight: Option<&InnerProductWeightClosure>,

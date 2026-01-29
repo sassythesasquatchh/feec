@@ -58,6 +58,7 @@ fn main() {
         &metric,
         load_vector,
         boundary_data,
+        None,
       );
 
       let conv_rate = |errors: &[f64], curr: f64| {

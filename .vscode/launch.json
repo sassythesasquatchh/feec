@@ -180,6 +180,75 @@
             "args": []
         },
         {
+            "name": "Debug example 'mixed_bc_2'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=mixed_bc_2",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+
+            "name": "Debug example 'mixed_bc_hodge_laplacian'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=mixed_bc_hodge_laplacian",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+
+            "name": "Debug example 'mixed_bc_2_hodge_laplacian'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=mixed_bc_2_hodge_laplacian",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+
+            "name": "Debug example 'mixed_bc_3_hodge_laplacian'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=mixed_bc_3_hodge_laplacian",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
+
+            "name": "Debug example 'neumann_bc_luis_example_3d'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=neumann_bc_luis_example_3d",
+                    "--package=formoniq"
+                ]
+            },
+            "args": []
+        },
+        {
             "name": "Debug unit tests in example 'mixed_bc'",
             "type": "lldb",
             "request": "launch",
