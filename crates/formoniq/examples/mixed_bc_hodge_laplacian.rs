@@ -1,7 +1,7 @@
 use ddf::cochain::{cochain_projection, partial_cochain_projection, Cochain};
 use formoniq::{
   assemble::assemble_boundary_integral_term,
-  io::{write_1form_vector_field_vtk, write_cochain_vtk},
+  io::{write_1form_vector_field_vtk, write_cochain, write_cochain_vtk},
   operators::InnerProductWeightClosure,
 };
 use manifold::topology::handle::KSimplexIdx;
@@ -16,14 +16,6 @@ use {
 };
 
 use std::{collections::HashSet, f64::consts::PI, fs, io::Write};
-
-fn write_cochain(path: &str, cochain: &Cochain) -> std::io::Result<()> {
-  let mut file = fs::File::create(path)?;
-  for coeff in cochain.coeffs.iter() {
-    writeln!(file, "{coeff:.12}")?;
-  }
-  Ok(())
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt::init();

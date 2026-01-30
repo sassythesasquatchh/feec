@@ -5,4 +5,8 @@ flamegraph.svg
 perf.data
 perf.data.old
 
+/petsc
+/slepc
+
 .vscode
+/crates/formoniq/meshes/*

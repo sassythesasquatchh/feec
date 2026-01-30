@@ -1,5 +1,5 @@
 use std::{
-  fs::File,
+  fs::{self, File},
   io::{self, BufWriter, Write},
   path::Path,
 };
@@ -9,6 +9,14 @@ use manifold::{
   geometry::coord::{mesh::MeshCoords, simplex::SimplexCoords},
   topology::{complex::Complex, handle::SkeletonHandle},
 };
+
+pub fn write_cochain(path: &str, cochain: &Cochain) -> std::io::Result<()> {
+  let mut file = fs::File::create(path)?;
+  for coeff in cochain.coeffs.iter() {
+    writeln!(file, "{coeff:.12}")?;
+  }
+  Ok(())
+}
 
 fn vtk_cell_type(k: usize) -> Option<u32> {
   match k {
@@ -292,6 +300,103 @@ pub fn write_1form_vector_field_vtk(
     let vx = value[0];
     let vy = if value.len() > 1 { value[1] } else { 0.0 };
     let vz = if value.len() > 2 { value[2] } else { 0.0 };
+    writeln!(w, "{vx:.12} {vy:.12} {vz:.12}")?;
+  }
+
+  Ok(())
+}
+
+/// Sample a Whitney 2-form at cell barycenters, Hodge-dual it to a vector field,
+/// and export as VTK (CELL_DATA).
+///
+/// Assumptions:
+/// - The provided cochain has degree 2 in a 3D mesh.
+/// - Coordinates are Euclidean; the Hodge dual reduces to the standard
+///   pseudovector mapping: (c01, c02, c12) -> (c12, -c02, c01).
+pub fn write_2form_vector_field_vtk(
+  path: impl AsRef<Path>,
+  coords: &MeshCoords,
+  topology: &Complex,
+  cochain: &Cochain,
+  data_name: &str,
+) -> io::Result<()> {
+  if cochain.dim() != 2 {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      format!("Expected a 2-cochain, got dim {}", cochain.dim()),
+    ));
+  }
+
+  if coords.dim() != 3 || topology.dim() != 3 {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      "write_2form_vector_field_vtk supports 3D meshes only",
+    ));
+  }
+
+  let topo_dim = topology.dim();
+  let cell_type = vtk_cell_type(topo_dim).ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::Other,
+      format!("Unsupported cell dimension {topo_dim}"),
+    )
+  })?;
+
+  let geom_skeleton = topology.skeleton(topo_dim);
+
+  let file = File::create(path)?;
+  let mut w = BufWriter::new(file);
+
+  writeln!(w, "# vtk DataFile Version 4.2")?;
+  writeln!(w, "{data_name}")?;
+  writeln!(w, "ASCII")?;
+  writeln!(w, "DATASET UNSTRUCTURED_GRID")?;
+
+  // Points
+  writeln!(w, "POINTS {} double", coords.nvertices())?;
+  for coord in coords.coord_iter() {
+    let x = coord[0];
+    let y = if coords.dim() > 1 { coord[1] } else { 0.0 };
+    let z = if coords.dim() > 2 { coord[2] } else { 0.0 };
+    writeln!(w, "{x:.6} {y:.6} {z:.6}")?;
+  }
+
+  // Cells
+  let nverts_per_cell = topo_dim + 1;
+  let ncells = geom_skeleton.len();
+  writeln!(w, "CELLS {} {}", ncells, ncells * (nverts_per_cell + 1))?;
+  write_skeleton_cells(&mut w, &geom_skeleton)?;
+
+  writeln!(w, "CELL_TYPES {}", ncells)?;
+  for _ in 0..ncells {
+    writeln!(w, "{cell_type}")?;
+  }
+
+  // Data: piecewise-constant vectors per top cell
+  let whitney = WhitneyForm::new(cochain.clone(), topology, coords);
+
+  writeln!(w, "CELL_DATA {}", ncells)?;
+  writeln!(w, "VECTORS {} double", data_name)?;
+
+  for cell in geom_skeleton.handle_iter() {
+    let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
+    let bary = cell_coords.barycenter();
+    let value = whitney.eval_known_cell(cell, &bary);
+
+    // value is a grade-2 element in 3D: coeffs correspond to (0,1), (0,2), (1,2)
+    let coeffs = value.coeffs();
+    assert!(
+      coeffs.len() == 3,
+      "Expected 3 coefficients for a 2-form in 3D"
+    );
+    let c01 = coeffs[0];
+    let c02 = coeffs[1];
+    let c12 = coeffs[2];
+
+    let vx = c12; // dy^dz term -> x component
+    let vy = -c02; // dx^dz term -> -y component (orientation)
+    let vz = c01; // dx^dy term -> z component
+
     writeln!(w, "{vx:.12} {vy:.12} {vz:.12}")?;
   }
 

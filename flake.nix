@@ -38,9 +38,6 @@
               linuxPackages_latest.perf
 
               mpi
-              petsc
-              slepc
-              arpack-mpi
               
               (python3.withPackages (ps: with ps; [
                 python-lsp-server
@@ -50,13 +47,6 @@
                 matplotlib
               ]))
             ];
-
-              shellHook = ''
-                export PETSC_DIR=${petsc}
-                export PETSC_ARCH=
-                export SLEPC_DIR=${slepc}
-                export ARPACK_DIR=${arpack-mpi}
-              '';
           };
         }
     );

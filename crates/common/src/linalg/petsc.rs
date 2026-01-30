@@ -145,10 +145,14 @@ pub fn petsc_ghiep(lhs: &CsrMatrix, rhs: &CsrMatrix, neigen_values: usize) -> (V
   let eigenvals = petsc_read_eigenvals(&format!("{PETSC_SOLVER_PATH}/out/eigenvals.bin")).unwrap();
   let eigenvecs = petsc_read_eigenvecs(&format!("{PETSC_SOLVER_PATH}/out/eigenvecs.bin")).unwrap();
 
+  let k = neigen_values.min(eigenvals.len());
+
+  let eigenvals = eigenvals.rows(0, k).into_owned();
+  let eigenvecs = eigenvecs.columns(0, k).into_owned();
   (eigenvals, eigenvecs)
 }
 
-pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector) -> Vector {
+pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector, has_harmonics: bool) -> Vector {
   let path = Path::new(PETSC_SOLVER_PATH);
 
   std::fs::create_dir_all(path.join("in")).unwrap_or_else(|e| {
@@ -170,18 +174,45 @@ pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector) -> Vector {
   });
 
   let in_path = path.join("in");
-
   petsc_write_matrix(lhs, in_path.join("A.bin").to_str().unwrap()).unwrap();
   petsc_write_vector(rhs, in_path.join("b.bin").to_str().unwrap()).unwrap();
 
   let binary = "./hils.out";
-  #[rustfmt::skip]
-  let args: [&str; 0] = [
-    //"-ksp_type", "minres",
-    //"-pc_type", "lu",
-    //"-ksp_max_it", "1000",
-    //"-ksp_rtol", "1e-9",
-  ];
+
+  // Keep current behavior (no args) unless harmonics are present.
+  let args: Vec<&str> = if has_harmonics {
+    vec![
+      // Outer Krylov
+      "-ksp_type",
+      "gmres",
+      "-ksp_max_it",
+      "1000",
+      "-ksp_rtol",
+      "1e-9",
+      "-ksp_error_if_not_converged",
+      // Saddle-point aware preconditioner (Schur complement)
+      "-pc_type",
+      "fieldsplit",
+      "-pc_fieldsplit_type",
+      "schur",
+      "-pc_fieldsplit_detect_saddle_point",
+      // Use upper factorization
+      "-pc_fieldsplit_schur_fact_type",
+      "upper",
+      // How to (approximately) solve the (non-saddle) block
+      "-fieldsplit_0_ksp_type",
+      "preonly",
+      "-fieldsplit_0_pc_type",
+      "ilu",
+      // How to handle the Schur block
+      "-fieldsplit_1_ksp_type",
+      "preonly",
+      "-fieldsplit_1_pc_type",
+      "none",
+    ]
+  } else {
+    Vec::new()
+  };
 
   let status = std::process::Command::new(binary)
     .current_dir(PETSC_SOLVER_PATH)
@@ -191,6 +222,5 @@ pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector) -> Vector {
   assert!(status.success());
 
   let out_path = path.join("out");
-
   petsc_read_vector(out_path.join("x.bin").to_str().unwrap()).unwrap()
 }

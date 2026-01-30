@@ -129,6 +129,10 @@ fn solve_hodge_laplace_source_inner(
     k_strong_bc_predicate,
   );
 
+  println!("Harmonics computed.");
+
+  // TODO subtract harmonic projection from the rhs galvec if homology_dim > 0
+
   // TODO The galmats are already built when computing the harmonics, so rebuilding them here is inefficient
   let galmats = if let (Some(coords), Some(weight)) = (coords, weight) {
     MixedGalmats::compute_weighted(topology, geometry, grade, coords, qr.clone(), weight)
@@ -166,7 +170,7 @@ fn solve_hodge_laplace_source_inner(
     &harmonics,
   );
 
-  let galsol = petsc_saddle_point(&system_matrix, &rhs);
+  let galsol = petsc_saddle_point(&system_matrix, &rhs, harmonics.ncols() > 0).into_owned();
 
   let sigma = if let (Some(k_minus_one_strong_bc_predicate), Some(k_minus_one_strong_bc_data)) =
     (k_minus_one_strong_bc_predicate, k_minus_one_strong_bc_data)
@@ -209,143 +213,6 @@ fn solve_hodge_laplace_source_inner(
   );
   (sigma, u, p)
 }
-
-// fn solve_hodge_laplace_source_inner(
-//   topology: &Complex,
-//   geometry: &MeshLengths,
-//   source_galvec: GalVec,
-//   grade: ExteriorGrade,
-//   homology_dim: usize,
-//   coords: Option<&MeshCoords>,
-//   qr: Option<SimplexQuadRule>,
-//   weight: Option<&InnerProductWeightClosure>,
-//   k_strong_bc_predicate: Option<&dyn Fn(KSimplexIdx) -> bool>,
-//   k_strong_bc_data: Option<&dyn Fn(KSimplexIdx) -> DofCoeff>,
-//   k_minus_one_strong_bc_predicate: Option<&dyn Fn(KSimplexIdx) -> bool>,
-//   k_minus_one_strong_bc_data: Option<&dyn Fn(KSimplexIdx) -> DofCoeff>,
-// ) -> (Cochain, Cochain, Cochain) {
-//   let harmonics = solve_hodge_laplace_harmonics_inner(
-//     topology,
-//     geometry,
-//     grade,
-//     homology_dim,
-//     coords,
-//     qr.clone(),
-//     weight,
-//     k_minus_one_strong_bc_predicate,
-//     k_strong_bc_predicate,
-//   );
-
-//   // TODO The galmats are already built when computing the harmonics, so rebuilding them here is inefficient
-//   let galmats = if let (Some(coords), Some(weight)) = (coords, weight) {
-//     MixedGalmats::compute_weighted(topology, geometry, grade, coords, qr.clone(), weight)
-//   } else {
-//     MixedGalmats::compute(topology, geometry, grade)
-//   };
-
-//   let mass_u = if let Some(k_pred) = k_strong_bc_predicate {
-//     let mut mass_u = galmats.mass_u.clone();
-//     let k_strong_bc_set = (0..mass_u.nrows())
-//       .filter(|&i| k_pred(i))
-//       .collect::<HashSet<_>>();
-//     assemble::drop_dofs_galmat(&k_strong_bc_set, &mut mass_u);
-//     CsrMatrix::from(&mass_u)
-//   } else {
-//     CsrMatrix::from(&galmats.mass_u)
-//   };
-
-//   // let mass_u = CsrMatrix::from(&galmats.mass_u);
-//   let mass_harmonics = &mass_u * &harmonics;
-
-//   let sigma_len = galmats.free_sigma_len(k_minus_one_strong_bc_predicate.unwrap());
-//   let u_len = galmats.free_u_len(k_strong_bc_predicate.unwrap());
-
-//   // let mut galmat = galmats.mixed_hodge_laplacian();
-//   let mut galmat = if let (Some(km1_pred), Some(k_pred)) =
-//     (k_minus_one_strong_bc_predicate, k_strong_bc_predicate)
-//   {
-//     galmats.reduced_mixed_hodge_laplacian(km1_pred, k_pred)
-//   } else {
-//     galmats.mixed_hodge_laplacian()
-//   };
-
-//   galmat.grow(mass_harmonics.ncols(), mass_harmonics.ncols());
-
-//   for (mut r, mut c) in (0..mass_harmonics.nrows()).cartesian_product(0..mass_harmonics.ncols()) {
-//     let v = mass_harmonics[(r, c)];
-//     r += sigma_len;
-//     c += sigma_len + u_len;
-//     galmat.push(r, c, v);
-//   }
-//   for (mut r, mut c) in (0..mass_harmonics.nrows()).cartesian_product(0..mass_harmonics.ncols()) {
-//     let v = mass_harmonics[(r, c)];
-//     // transpose
-//     mem::swap(&mut r, &mut c);
-//     r += sigma_len + u_len;
-//     c += sigma_len;
-//     galmat.push(r, c, v);
-//   }
-
-//   let system_matrix = CsrMatrix::from(&galmat);
-
-//   #[allow(clippy::toplevel_ref_arg)]
-//   let rhs = na::stack![
-//     Vector::zeros(sigma_len);
-//     source_galvec;
-//     Vector::zeros(harmonics.ncols());
-//   ];
-
-//   let galsol = petsc_saddle_point(&system_matrix, &rhs);
-
-//   let sigma = if let (Some(k_minus_one_strong_bc_predicate), Some(k_minus_one_strong_bc_data)) =
-//     (k_minus_one_strong_bc_predicate, k_minus_one_strong_bc_data)
-//   {
-//     let boundary_data = (0..galmats.sigma_len())
-//       .filter(|&i| k_minus_one_strong_bc_predicate(i))
-//       .map(|i| (i, k_minus_one_strong_bc_data(i)))
-//       .collect::<Vec<_>>();
-//     let mut temp_sigma = galsol.view_range(..sigma_len, 0).into_owned();
-//     assemble::reintroduce_non_homogenous_dofs_galsols(&boundary_data, &mut temp_sigma);
-//     Cochain::new(grade - 1, temp_sigma)
-//   } else {
-//     Cochain::new(grade - 1, galsol.view_range(..sigma_len, 0).into_owned())
-//   };
-
-//   let u = if let (Some(k_strong_bc_predicate), Some(k_strong_bc_data)) =
-//     (k_strong_bc_predicate, k_strong_bc_data)
-//   {
-//     let boundary_data = (0..galmats.u_len())
-//       .filter(|&i| k_strong_bc_predicate(i))
-//       .map(|i| (i, k_strong_bc_data(i)))
-//       .collect::<Vec<_>>();
-//     let mut temp_u = galsol
-//       .view_range(sigma_len..sigma_len + u_len, 0)
-//       .into_owned();
-//     assemble::reintroduce_non_homogenous_dofs_galsols(&boundary_data, &mut temp_u);
-//     Cochain::new(grade, temp_u)
-//   } else {
-//     Cochain::new(
-//       grade,
-//       galsol
-//         .view_range(sigma_len..sigma_len + u_len, 0)
-//         .into_owned(),
-//     )
-//   };
-
-//   // let sigma = Cochain::new(grade - 1, galsol.view_range(..sigma_len, 0).into_owned());
-//   // let u = Cochain::new(
-//   //   grade,
-//   //   galsol
-//   //     .view_range(sigma_len..sigma_len + u_len, 0)
-//   //     .into_owned(),
-//   // );
-
-//   let p = Cochain::new(
-//     grade,
-//     galsol.view_range(sigma_len + u_len.., 0).into_owned(),
-//   );
-//   (sigma, u, p)
-// }
 
 pub fn solve_hodge_laplace_harmonics(
   topology: &Complex,
@@ -415,7 +282,13 @@ fn solve_hodge_laplace_harmonics_inner(
     k_minus_one_strong_bc_predicate,
     k_strong_bc_predicate,
   );
-  assert!(eigenvals.iter().all(|&eigenval| eigenval <= 1e-12));
+
+  if !eigenvals.iter().all(|&eigenval| eigenval <= 1e-12) {
+    panic!(
+      "Expected zero eigenvalues for harmonic forms, but got eigenvalues: {:?}",
+      eigenvals
+    );
+  }
   harmonics
 }
 
@@ -501,16 +374,22 @@ fn solve_hodge_laplace_evp_inner(
     MixedGalmats::compute(topology, geometry, grade)
   };
 
-  let lhs = if let (Some(km1_pred), Some(k_pred)) =
+  let (lhs, sigma_len, u_len) = if let (Some(km1_pred), Some(k_pred)) =
     (k_minus_one_strong_bc_predicate, k_strong_bc_predicate)
   {
-    galmats.reduced_mixed_hodge_laplacian(km1_pred, k_pred)
+    (
+      galmats.reduced_mixed_hodge_laplacian(km1_pred, k_pred),
+      galmats.free_sigma_len(km1_pred),
+      galmats.free_u_len(k_pred),
+    )
   } else {
-    galmats.mixed_hodge_laplacian()
+    (
+      galmats.mixed_hodge_laplacian(),
+      galmats.sigma_len(),
+      galmats.u_len(),
+    )
   };
 
-  let sigma_len = galmats.sigma_len();
-  let u_len = galmats.u_len();
   let mut rhs = CooMatrix::zeros(sigma_len + u_len, sigma_len + u_len);
   let mass_u = if let Some(k_strong_bc_predicate) = k_strong_bc_predicate {
     let mut mass_u = galmats.mass_u.clone();
@@ -803,8 +682,6 @@ impl MixedGalmats {
       &mut codif_u_neg,
     );
 
-    assemble::drop_dofs_galmat(&k_strongly_enforced_dofs, &mut mass_u);
-
     let k_strongly_enforced_dofs_slice =
       k_strongly_enforced_dofs.iter().cloned().collect::<Vec<_>>();
     let k_minus_one_strongly_enforced_dofs_slice = k_minus_one_strongly_enforced_dofs
@@ -819,11 +696,17 @@ impl MixedGalmats {
     let mut galmat = CooMatrix::block(&[&[&mass_sigma, &codif_u_neg], &[&dif_sigma, &codifdif_u]]);
 
     let rhs_vec = if harmonics.ncols() > 0 {
-      let mut harmonics_rhs = Vector::zeros(harmonics.ncols());
+      let mut harmonics_rhs = Vector::zeros(mass_u.nrows());
 
+      // Restricts mass_u to free dofs and makes rhs equal to -M_ID * u_D
       fix_dofs_coeff_strong_coo(&k_strongly_enforced_data, &mut mass_u, &mut harmonics_rhs);
 
+      assemble::drop_dofs_galvec(&k_strongly_enforced_dofs_slice, &mut harmonics_rhs);
+
+      // RHS finally equal to -H^T * M_ID * u_D
       harmonics_rhs = &harmonics.transpose() * &harmonics_rhs;
+
+      assemble::drop_dofs_galmat(&k_strongly_enforced_dofs, &mut mass_u);
 
       let mass_u_csr = CsrMatrix::from(&mass_u);
 
