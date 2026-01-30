@@ -9,4 +9,4 @@ perf.data.old
 /slepc
 
 .vscode
-/crates/formoniq/meshes/*
+meshes/*
