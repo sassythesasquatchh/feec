@@ -111,6 +111,32 @@ fn apply_optional_weight<T: ApplyWeight>(
   }
 }
 
+fn averaged_cell_weight<T>(
+  cell: &Simplex,
+  coords: &MeshCoords,
+  qr: &SimplexQuadRule,
+  weight: &InnerProductWeightClosure<T>,
+) -> InnerProductWeight<T>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  let cell_coords = SimplexCoords::from_simplex_and_coords(cell, coords);
+
+  // vol is set to 1 because we are not integrating over the simplex volume here,
+  // we simply want the average value of the weight function over the simplex.
+  let quadrature_result = qr.integrate_local(
+    &|local: CoordRef| {
+      let global = cell_coords.local2global(local);
+      (weight.f)(global.as_view())
+    },
+    1.0,
+  );
+
+  InnerProductWeight {
+    weight: quadrature_result,
+  }
+}
+
 fn scalar_cell_weight(
   cell: &Simplex,
   weight_function: Option<&InnerProductWeightClosure<f64>>,
@@ -119,21 +145,252 @@ fn scalar_cell_weight(
 ) -> f64 {
   let weight =
     if let (Some(weight_function), Some(coords), Some(qr)) = (weight_function, coords, qr) {
-      let cell_coords = SimplexCoords::from_simplex_and_coords(cell, coords);
-      // vol is set to 1 because we are not integrating over the simplex volume here,
-      // we simply want the average value of the weight function over the simplex.
-      qr.integrate_local(
-        &|local: CoordRef| {
-          let global = cell_coords.local2global(local);
-          (weight_function.f)(global.as_view())
-        },
-        1.0,
-      )
+      averaged_cell_weight(cell, coords, qr, weight_function).weight
     } else {
       1.0
     };
 
   weight
+}
+
+fn assert_supported_nc1_dim(dim: Dim) {
+  assert!(
+    matches!(dim, 2 | 3),
+    "NC1 support is implemented only for simplicial meshes with intrinsic dimension 2 or 3."
+  );
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn nc1_local_nedges(dim: Dim) -> usize {
+  match dim {
+    2 => 3,
+    3 => 6,
+    _ => {
+      assert_supported_nc1_dim(dim);
+      unreachable!();
+    }
+  }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn nc1_local_ndofs(dim: Dim) -> usize {
+  2 * nc1_local_nedges(dim)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn nc1_local_embedding_matrix(dim: Dim) -> Matrix {
+  assert_supported_nc1_dim(dim);
+
+  let nedges = nc1_local_nedges(dim);
+  let mut embedding = Matrix::zeros(nc1_local_ndofs(dim), nedges);
+  for iedge in 0..nedges {
+    embedding[(2 * iedge, iedge)] = 1.0;
+    embedding[(2 * iedge + 1, iedge)] = 1.0;
+  }
+  embedding
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn nc1_local_projection_matrix(dim: Dim) -> Matrix {
+  0.5 * nc1_local_embedding_matrix(dim).transpose()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn nc1_local_dof_vertex(dim: Dim, local_dof: usize) -> usize {
+  assert_supported_nc1_dim(dim);
+
+  let local_edges: Vec<_> = standard_subsimps(dim, 1).collect();
+  let edge = &local_edges[local_dof / 2];
+  edge[local_dof % 2]
+}
+
+fn nc1_local_basis_coeffs(dim: Dim, coord: CoordRef) -> Matrix {
+  assert_supported_nc1_dim(dim);
+
+  match dim {
+    2 => {
+      let x = coord[0];
+      let y = coord[1];
+
+      na::dmatrix![
+        1.0 - x - y, x, 0.0, y, 0.0, -y;
+        0.0, x, 1.0 - x - y, y, x, 0.0;
+      ]
+    }
+    3 => {
+      let x = coord[0];
+      let y = coord[1];
+      let z = coord[2];
+
+      na::dmatrix![
+        1.0 - x - y - z, x, 0.0, y, 0.0, z, 0.0, -y, 0.0, -z, 0.0, 0.0;
+        0.0, x, 1.0 - x - y - z, y, 0.0, z, x, 0.0, 0.0, 0.0, 0.0, -z;
+        0.0, x, 0.0, y, 1.0 - x - y - z, z, 0.0, 0.0, x, 0.0, y, 0.0;
+      ]
+    }
+    _ => unreachable!(),
+  }
+}
+
+/// Element matrix for the full first-order H(curl) space NC1 = P1 Lambda^1 on simplices.
+pub struct Nc1MassElmat<'a, T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  dim: Dim,
+  coords: Option<&'a MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&'a InnerProductWeightClosure<T>>,
+}
+
+impl<'a, T: AddAssign + Mul<f64, Output = T> + ApplyWeight> Nc1MassElmat<'a, T> {
+  pub fn new_weighted(
+    dim: Dim,
+    coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: &'a InnerProductWeightClosure<T>,
+  ) -> Self {
+    assert_supported_nc1_dim(dim);
+    let qr = qr.unwrap_or(SimplexQuadRule::barycentric(dim));
+    Self::_new(dim, Some(coords), Some(qr), Some(weight))
+  }
+
+  fn _new(
+    dim: Dim,
+    coords: Option<&'a MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<&'a InnerProductWeightClosure<T>>,
+  ) -> Self {
+    assert_supported_nc1_dim(dim);
+    Self {
+      dim,
+      coords,
+      qr,
+      weight,
+    }
+  }
+
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
+    assert_eq!(self.dim, geometry.dim());
+
+    let weight_to_apply = if let Some(weight) = &self.weight {
+      let topology =
+        topology.expect("Weighted Nc1MassElmat requires a cell (topology) to evaluate the weight.");
+      let qr = self
+        .qr
+        .as_ref()
+        .expect("Inner product weight provided, but no quadrature rule specified.");
+      let coords = self
+        .coords
+        .as_ref()
+        .expect("Inner product weight provided, but no mesh coordinates specified.");
+
+      Some(averaged_cell_weight(topology, coords, qr, weight))
+    } else {
+      None
+    };
+
+    let inner = multi_gramian(&geometry.to_metric_tensor().inverse(), 1);
+    let qr = SimplexQuadRule::order3(self.dim);
+    qr.integrate_local(
+      &|local: CoordRef| {
+        let basis_coeffs = nc1_local_basis_coeffs(self.dim, local);
+        inner.inner_mat(
+          &apply_optional_weight(weight_to_apply.as_ref(), &basis_coeffs),
+          &basis_coeffs,
+        )
+      },
+      geometry.vol(),
+    )
+  }
+}
+
+impl<'a> Nc1MassElmat<'a, f64> {
+  pub fn new(dim: Dim) -> Self {
+    Self::_new(dim, None, None, None)
+  }
+}
+
+impl<'a, T: AddAssign + Mul<f64, Output = T> + ApplyWeight> Nc1MassElmat<'a, T> {
+  pub fn eval(&self, geometry: &SimplexLengths) -> Matrix {
+    debug_assert!(self.weight.is_none());
+    self._eval(geometry, None)
+  }
+
+  pub fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> Matrix {
+    self._eval(geometry, Some(cell))
+  }
+}
+
+/// Element matrix for the mass-lumped full first-order H(curl) space NC1 = P1 Lambda^1.
+pub struct Nc1LumpedMassElmat<'a> {
+  dim: Dim,
+  coords: Option<&'a MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&'a InnerProductWeightClosure<f64>>,
+}
+
+impl<'a> Nc1LumpedMassElmat<'a> {
+  pub fn new(dim: Dim) -> Self {
+    Self::_new(dim, None, None, None)
+  }
+
+  pub fn new_weighted(
+    dim: Dim,
+    coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: &'a InnerProductWeightClosure<f64>,
+  ) -> Self {
+    assert_supported_nc1_dim(dim);
+    let qr = qr.unwrap_or(SimplexQuadRule::barycentric(dim));
+    Self::_new(dim, Some(coords), Some(qr), Some(weight))
+  }
+
+  fn _new(
+    dim: Dim,
+    coords: Option<&'a MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<&'a InnerProductWeightClosure<f64>>,
+  ) -> Self {
+    assert_supported_nc1_dim(dim);
+    Self {
+      dim,
+      coords,
+      qr,
+      weight,
+    }
+  }
+
+  fn _eval(&self, geometry: &SimplexLengths, cell: Option<&Simplex>) -> Matrix {
+    assert_eq!(self.dim, geometry.dim());
+
+    let cell_weight = if let Some(weight) = self.weight {
+      let cell = cell.expect("Weighted Nc1LumpedMassElmat requires a cell (topology).");
+      scalar_cell_weight(cell, Some(weight), self.coords, self.qr.as_ref())
+    } else {
+      1.0
+    };
+
+    let inner = multi_gramian(&geometry.to_metric_tensor().inverse(), 1);
+    let qr = SimplexQuadRule::vertices(self.dim);
+    cell_weight
+      * qr.integrate_local(
+        &|local: CoordRef| {
+          let basis_coeffs = nc1_local_basis_coeffs(self.dim, local);
+          inner.inner_mat(&basis_coeffs, &basis_coeffs)
+        },
+        geometry.vol(),
+      )
+  }
+
+  pub fn eval(&self, geometry: &SimplexLengths) -> Matrix {
+    debug_assert!(self.weight.is_none());
+    self._eval(geometry, None)
+  }
+
+  pub fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> Matrix {
+    self._eval(geometry, Some(cell))
+  }
 }
 
 /// Exact Element Matrix Provider for the Laplace-Beltrami operator.
@@ -345,21 +602,7 @@ impl<'a, T: AddAssign + Mul<f64, Output = T> + ApplyWeight> HodgeMassElmat<'a, T
         .as_ref()
         .expect("Inner product weight provided, but no mesh coordinates specified.");
 
-      let cell_coords = SimplexCoords::from_simplex_and_coords(topology, coords);
-
-      // vol is set to 1 because we are not integrating over the simplex volume here,
-      // we simply want the average value of the weight function over the simplex.
-      let quadrature_result = qr.integrate_local(
-        &|local: CoordRef| {
-          let global = cell_coords.local2global(local);
-          (weight.f)(global.as_view())
-        },
-        1.0,
-      );
-
-      Some(InnerProductWeight {
-        weight: quadrature_result,
-      })
+      Some(averaged_cell_weight(topology, coords, qr, weight))
     } else {
       None
     };
@@ -763,8 +1006,10 @@ where
 #[cfg(test)]
 mod test {
   use crate::operators::{
-    CodifDifElmat, CodifElmat, CoordAwareElMatProvider, DifElmat, ElMatProvider, HodgeMassElmat,
-    InnerProductWeightClosure, LaplaceBeltramiElmat, Matrix, ScalarMassElmat,
+    nc1_local_dof_vertex, nc1_local_embedding_matrix, nc1_local_projection_matrix, CodifDifElmat,
+    CodifElmat, CoordAwareElMatProvider, DifElmat, ElMatProvider, HodgeMassElmat,
+    InnerProductWeightClosure, LaplaceBeltramiElmat, Matrix, Nc1LumpedMassElmat, Nc1MassElmat,
+    ScalarMassElmat,
   };
 
   use approx::assert_relative_eq;
@@ -938,5 +1183,149 @@ mod test {
       .eval_with_coords(&geo, &cell);
 
     assert_relative_eq!(&weighted, &unweighted, max_relative = RTOL);
+  }
+
+  #[test]
+  fn nc1_projection_times_embedding_is_identity() {
+    for dim in [2, 3] {
+      let projection = nc1_local_projection_matrix(dim);
+      let embedding = nc1_local_embedding_matrix(dim);
+      let identity = Matrix::identity(projection.nrows(), projection.nrows());
+      assert_relative_eq!(&(projection * embedding), &identity);
+    }
+  }
+
+  #[test]
+  fn nc1_mass_matches_whitney_mass_via_embedding() {
+    for dim in [2, 3] {
+      let geo = SimplexLengths::standard(dim);
+      let embedding = nc1_local_embedding_matrix(dim);
+      let nc1_mass = Nc1MassElmat::new(dim).eval(&geo);
+      let whitney_mass = HodgeMassElmat::new(dim, 1).eval(&geo);
+      assert_relative_eq!(
+        &(embedding.transpose() * nc1_mass * embedding),
+        &whitney_mass
+      );
+    }
+  }
+
+  #[test]
+  fn weighted_nc1_mass_scales_with_constant_scalar_weight() {
+    const W: f64 = 2.5;
+    const RTOL: f64 = 1e-12;
+
+    for dim in [2, 3] {
+      let geo = SimplexLengths::standard(dim);
+      let topo = Complex::standard(dim);
+      let cell = topo.cells().handle_iter().next().unwrap();
+
+      let unweighted = Nc1MassElmat::new(dim).eval(&geo);
+
+      let coords = MeshCoords::standard(dim);
+      let weight = InnerProductWeightClosure::new(|_| W);
+
+      let weighted =
+        Nc1MassElmat::new_weighted(dim, &coords, None, &weight).eval_with_coords(&geo, &cell);
+
+      assert_relative_eq!(&weighted, &(W * unweighted), max_relative = RTOL);
+    }
+  }
+
+  #[test]
+  fn weighted_nc1_mass_matrix_identity_matches_unweighted() {
+    const RTOL: f64 = 1e-12;
+
+    let dim = 3;
+    let geo = SimplexLengths::standard(dim);
+    let topo = Complex::standard(dim);
+    let cell = topo.cells().handle_iter().next().unwrap();
+
+    let unweighted = Nc1MassElmat::<f64>::new(dim).eval(&geo);
+    let coords = MeshCoords::standard(dim);
+    let weight = InnerProductWeightClosure::new(move |_| Matrix::identity(dim, dim));
+
+    let weighted = Nc1MassElmat::<Matrix>::new_weighted(dim, &coords, None, &weight)
+      .eval_with_coords(&geo, &cell);
+
+    assert_relative_eq!(&weighted, &unweighted, max_relative = RTOL);
+  }
+
+  #[test]
+  fn nc1_lumped_mass_is_vertex_block_diagonal() {
+    const RTOL: f64 = 1e-12;
+
+    for dim in [2, 3] {
+      let geo = SimplexLengths::standard(dim);
+      let lumped = Nc1LumpedMassElmat::new(dim).eval(&geo);
+
+      for i in 0..lumped.nrows() {
+        for j in 0..lumped.ncols() {
+          if nc1_local_dof_vertex(dim, i) != nc1_local_dof_vertex(dim, j) {
+            assert_relative_eq!(lumped[(i, j)], 0.0, max_relative = RTOL, epsilon = RTOL);
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn weighted_nc1_lumped_mass_scales_with_constant_scalar_weight() {
+    const W: f64 = 2.5;
+    const RTOL: f64 = 1e-12;
+
+    for dim in [2, 3] {
+      let geo = SimplexLengths::standard(dim);
+      let topo = Complex::standard(dim);
+      let cell = topo.cells().handle_iter().next().unwrap();
+
+      let unweighted = Nc1LumpedMassElmat::new(dim).eval(&geo);
+
+      let coords = MeshCoords::standard(dim);
+      let weight = InnerProductWeightClosure::new(|_| W);
+      let weighted =
+        Nc1LumpedMassElmat::new_weighted(dim, &coords, None, &weight).eval_with_coords(&geo, &cell);
+
+      assert_relative_eq!(&weighted, &(W * unweighted), max_relative = RTOL);
+    }
+  }
+
+  #[test]
+  fn nc1_local_projected_sparse_inverse_matches_dense_formula() {
+    const RTOL: f64 = 1e-12;
+
+    for dim in [2, 3] {
+      let lumped = Nc1LumpedMassElmat::new(dim).eval(&SimplexLengths::standard(dim));
+      let projection = nc1_local_projection_matrix(dim);
+      let expected = &projection * lumped.clone().try_inverse().unwrap() * projection.transpose();
+
+      let mut inverse = Matrix::zeros(lumped.nrows(), lumped.ncols());
+      for ivertex in 0..=dim {
+        let dofs = (0..lumped.nrows())
+          .filter(|&idof| nc1_local_dof_vertex(dim, idof) == ivertex)
+          .collect::<Vec<_>>();
+
+        let mut block = Matrix::zeros(dofs.len(), dofs.len());
+        for (iblock, &iglobal) in dofs.iter().enumerate() {
+          for (jblock, &jglobal) in dofs.iter().enumerate() {
+            block[(iblock, jblock)] = lumped[(iglobal, jglobal)];
+          }
+        }
+
+        let inv_block = block
+          .clone()
+          .cholesky()
+          .expect("NC1 lumped mass vertex block must be positive definite.")
+          .inverse();
+
+        for (iblock, &iglobal) in dofs.iter().enumerate() {
+          for (jblock, &jglobal) in dofs.iter().enumerate() {
+            inverse[(iglobal, jglobal)] = inv_block[(iblock, jblock)];
+          }
+        }
+      }
+
+      let actual = &projection * inverse * projection.transpose();
+      assert_relative_eq!(&actual, &expected, max_relative = RTOL, epsilon = RTOL);
+    }
   }
 }

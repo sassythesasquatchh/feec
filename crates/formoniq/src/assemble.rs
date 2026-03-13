@@ -1,4 +1,7 @@
-use crate::operators::{CoordAwareElMatProvider, DofIdx, ElMatProvider, ElVecProvider};
+use crate::operators::{
+  ApplyWeight, CoordAwareElMatProvider, DofIdx, ElMatProvider, ElVecProvider,
+  InnerProductWeightClosure, Nc1LumpedMassElmat, Nc1MassElmat,
+};
 
 use common::{
   linalg::nalgebra::{CooMatrix, CooMatrixExt, CsrMatrix, Matrix, Vector},
@@ -27,8 +30,128 @@ use manifold::{
 use itertools::izip;
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::ops::{AddAssign, Mul};
 
 pub type GalMat = CooMatrix;
+
+fn assert_supported_nc1_dim(dim: Dim) {
+  assert!(
+    matches!(dim, 2 | 3),
+    "NC1 support is implemented only for simplicial meshes with intrinsic dimension 2 or 3."
+  );
+}
+
+fn nc1_global_dof(edge_kidx: usize, slot: usize) -> usize {
+  2 * edge_kidx + slot
+}
+
+fn nc1_vertex_dofs(topology: &Complex) -> Vec<Vec<usize>> {
+  assert_supported_nc1_dim(topology.dim());
+
+  let mut vertex_dofs = vec![Vec::new(); topology.vertices().len()];
+  for edge in topology.edges().handle_iter() {
+    // Slot 0/1 corresponds to the first/second endpoint in lexicographic edge order.
+    vertex_dofs[edge[0]].push(nc1_global_dof(edge.kidx(), 0));
+    vertex_dofs[edge[1]].push(nc1_global_dof(edge.kidx(), 1));
+  }
+  for dofs in &mut vertex_dofs {
+    dofs.sort_unstable();
+  }
+  vertex_dofs
+}
+
+fn nc1_lumped_mass_inverse_blocks(
+  topology: &Complex,
+  lumped_mass: &GalMat,
+) -> (Vec<Vec<usize>>, Vec<Matrix>) {
+  assert_supported_nc1_dim(topology.dim());
+  let ndofs = 2 * topology.edges().len();
+  assert_eq!(lumped_mass.nrows(), ndofs);
+  assert_eq!(lumped_mass.ncols(), ndofs);
+
+  let vertex_dofs = nc1_vertex_dofs(topology);
+  let mut dof_locations = vec![None; ndofs];
+  let mut blocks = Vec::with_capacity(vertex_dofs.len());
+  for (ivertex, dofs) in vertex_dofs.iter().enumerate() {
+    for (ilocal, &dof) in dofs.iter().enumerate() {
+      assert!(dof_locations[dof].is_none());
+      dof_locations[dof] = Some((ivertex, ilocal));
+    }
+    blocks.push(Matrix::zeros(dofs.len(), dofs.len()));
+  }
+
+  for (r, c, &v) in lumped_mass.triplet_iter() {
+    let Some((ivertex_r, ilocal_r)) = dof_locations[r] else {
+      panic!("NC1 dof {r} is not associated with a mesh vertex.");
+    };
+    let Some((ivertex_c, ilocal_c)) = dof_locations[c] else {
+      panic!("NC1 dof {c} is not associated with a mesh vertex.");
+    };
+
+    if ivertex_r != ivertex_c {
+      assert!(
+        v.abs() <= 1e-12,
+        "NC1 lumped mass must not couple dofs attached to different vertices."
+      );
+      continue;
+    }
+    blocks[ivertex_r][(ilocal_r, ilocal_c)] += v;
+  }
+
+  let inverse_blocks = blocks
+    .into_iter()
+    .map(|block| {
+      block
+        .clone()
+        .cholesky()
+        .expect("NC1 lumped mass vertex block must be positive definite.")
+        .inverse()
+    })
+    .collect();
+
+  (vertex_dofs, inverse_blocks)
+}
+
+fn assemble_nc1_lumped_mass_inverse_from_blocks(
+  ndofs: usize,
+  vertex_dofs: &[Vec<usize>],
+  inverse_blocks: &[Matrix],
+) -> GalMat {
+  let mut galmat = GalMat::new(ndofs, ndofs);
+  for (dofs, block) in vertex_dofs.iter().zip(inverse_blocks) {
+    for (ilocal, &iglobal) in dofs.iter().enumerate() {
+      for (jlocal, &jglobal) in dofs.iter().enumerate() {
+        let value = block[(ilocal, jlocal)];
+        if value != 0.0 {
+          galmat.push(iglobal, jglobal, value);
+        }
+      }
+    }
+  }
+  galmat
+}
+
+fn assemble_whitney_projected_sparse_inverse_from_blocks(
+  topology: &Complex,
+  vertex_dofs: &[Vec<usize>],
+  inverse_blocks: &[Matrix],
+) -> GalMat {
+  let nedges = topology.edges().len();
+  let mut galmat = GalMat::new(nedges, nedges);
+  for (dofs, block) in vertex_dofs.iter().zip(inverse_blocks) {
+    for (ilocal, &idof) in dofs.iter().enumerate() {
+      let iedge = idof / 2;
+      for (jlocal, &jdof) in dofs.iter().enumerate() {
+        let jedge = jdof / 2;
+        let value = 0.25 * block[(ilocal, jlocal)];
+        if value != 0.0 {
+          galmat.push(iedge, jedge, value);
+        }
+      }
+    }
+  }
+  galmat
+}
 
 /// Assembly algorithm for the Galerkin Matrix.
 fn assemble_galmat_impl<M>(
@@ -73,6 +196,50 @@ where
   GalMat::try_from_triplets(nsimps_row, nsimps_col, rows, cols, values).unwrap()
 }
 
+fn assemble_nc1_galmat_impl<M>(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  eval: impl Fn(&SimplexLengths, &Simplex) -> M + Sync,
+) -> GalMat
+where
+  M: std::ops::Index<(usize, usize), Output = f64> + Send,
+{
+  assert_supported_nc1_dim(topology.dim());
+
+  let ndofs = 2 * topology.edges().len();
+
+  let triplets: Vec<(usize, usize, f64)> = topology
+    .cells()
+    .handle_iter()
+    .par_bridge()
+    .flat_map(|cell| {
+      let geo = geometry.simplex_lengths(cell);
+      let elmat = eval(&geo, &cell);
+
+      let local_edges: Vec<_> = cell.mesh_subsimps(1).collect();
+      let nlocal_dofs = 2 * local_edges.len();
+
+      let mut local_triplets = Vec::new();
+      for ilocal in 0..nlocal_dofs {
+        let iglobal = nc1_global_dof(local_edges[ilocal / 2].kidx(), ilocal % 2);
+
+        for jlocal in 0..nlocal_dofs {
+          let jglobal = nc1_global_dof(local_edges[jlocal / 2].kidx(), jlocal % 2);
+          let val = elmat[(ilocal, jlocal)];
+          if val != 0.0 {
+            local_triplets.push((iglobal, jglobal, val));
+          }
+        }
+      }
+
+      local_triplets
+    })
+    .collect();
+
+  let (rows, cols, values) = triplets.into_iter().multiunzip();
+  GalMat::try_from_triplets(ndofs, ndofs, rows, cols, values).unwrap()
+}
+
 pub fn assemble_galmat(
   topology: &Complex,
   geometry: &MeshLengths,
@@ -91,6 +258,119 @@ pub fn assemble_galmat_coord_aware(
   assemble_galmat_impl(topology, geometry, r, c, move |geo, cell| {
     elmat.eval_with_coords(geo, cell)
   })
+}
+
+pub fn assemble_nc1_mass_galmat(topology: &Complex, geometry: &MeshLengths) -> GalMat {
+  let dim = topology.dim();
+  assemble_nc1_galmat_impl(topology, geometry, move |geo, _cell| {
+    Nc1MassElmat::new(dim).eval(geo)
+  })
+}
+
+pub fn assemble_nc1_mass_galmat_weighted<T>(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure<T>,
+) -> GalMat
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  let dim = topology.dim();
+  let elmat = Nc1MassElmat::new_weighted(dim, coords, qr, weight);
+  assemble_nc1_galmat_impl(topology, geometry, move |geo, cell| {
+    elmat.eval_with_coords(geo, cell)
+  })
+}
+
+pub fn assemble_nc1_lumped_mass_galmat(topology: &Complex, geometry: &MeshLengths) -> GalMat {
+  let dim = topology.dim();
+  assemble_nc1_galmat_impl(topology, geometry, move |geo, _cell| {
+    Nc1LumpedMassElmat::new(dim).eval(geo)
+  })
+}
+
+pub fn assemble_nc1_lumped_mass_galmat_weighted(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure<f64>,
+) -> GalMat {
+  let dim = topology.dim();
+  let elmat = Nc1LumpedMassElmat::new_weighted(dim, coords, qr, weight);
+  assemble_nc1_galmat_impl(topology, geometry, move |geo, cell| {
+    elmat.eval_with_coords(geo, cell)
+  })
+}
+
+pub fn assemble_nc1_lumped_mass_inverse_galmat(
+  topology: &Complex,
+  geometry: &MeshLengths,
+) -> GalMat {
+  let lumped_mass = assemble_nc1_lumped_mass_galmat(topology, geometry);
+  let (vertex_dofs, inverse_blocks) = nc1_lumped_mass_inverse_blocks(topology, &lumped_mass);
+  assemble_nc1_lumped_mass_inverse_from_blocks(lumped_mass.nrows(), &vertex_dofs, &inverse_blocks)
+}
+
+pub fn assemble_nc1_lumped_mass_inverse_galmat_weighted(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure<f64>,
+) -> GalMat {
+  let lumped_mass =
+    assemble_nc1_lumped_mass_galmat_weighted(topology, geometry, coords, qr, weight);
+  let (vertex_dofs, inverse_blocks) = nc1_lumped_mass_inverse_blocks(topology, &lumped_mass);
+  assemble_nc1_lumped_mass_inverse_from_blocks(lumped_mass.nrows(), &vertex_dofs, &inverse_blocks)
+}
+
+pub fn assemble_nc1_to_whitney_projection_galmat(topology: &Complex) -> GalMat {
+  assert_supported_nc1_dim(topology.dim());
+
+  let nedges = topology.edges().len();
+  let mut galmat = GalMat::new(nedges, 2 * nedges);
+  for iedge in 0..nedges {
+    galmat.push(iedge, nc1_global_dof(iedge, 0), 0.5);
+    galmat.push(iedge, nc1_global_dof(iedge, 1), 0.5);
+  }
+  galmat
+}
+
+pub fn assemble_whitney_to_nc1_embedding_galmat(topology: &Complex) -> GalMat {
+  assert_supported_nc1_dim(topology.dim());
+
+  let nedges = topology.edges().len();
+  let mut galmat = GalMat::new(2 * nedges, nedges);
+  for iedge in 0..nedges {
+    galmat.push(nc1_global_dof(iedge, 0), iedge, 1.0);
+    galmat.push(nc1_global_dof(iedge, 1), iedge, 1.0);
+  }
+  galmat
+}
+
+pub fn assemble_whitney_projected_sparse_inverse_galmat(
+  topology: &Complex,
+  geometry: &MeshLengths,
+) -> GalMat {
+  let lumped_mass = assemble_nc1_lumped_mass_galmat(topology, geometry);
+  let (vertex_dofs, inverse_blocks) = nc1_lumped_mass_inverse_blocks(topology, &lumped_mass);
+  assemble_whitney_projected_sparse_inverse_from_blocks(topology, &vertex_dofs, &inverse_blocks)
+}
+
+pub fn assemble_whitney_projected_sparse_inverse_galmat_weighted(
+  topology: &Complex,
+  geometry: &MeshLengths,
+  coords: &MeshCoords,
+  qr: Option<SimplexQuadRule>,
+  weight: &InnerProductWeightClosure<f64>,
+) -> GalMat {
+  let lumped_mass =
+    assemble_nc1_lumped_mass_galmat_weighted(topology, geometry, coords, qr, weight);
+  let (vertex_dofs, inverse_blocks) = nc1_lumped_mass_inverse_blocks(topology, &lumped_mass);
+  assemble_whitney_projected_sparse_inverse_from_blocks(topology, &vertex_dofs, &inverse_blocks)
 }
 
 pub type GalVec = Vector;
