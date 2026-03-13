@@ -574,9 +574,7 @@ pub fn fix_dofs_coeff_alt(dof_coeffs: &[(DofIdx, f64)], galmat: &mut GalMat, gal
 mod tests {
   use super::*;
   use approx::assert_abs_diff_eq;
-  use manifold::{
-    geometry::coord::mesh::standard_coord_complex, r#gen::cartesian::CartesianMeshInfo,
-  };
+  use manifold::geometry::coord::mesh::standard_coord_complex;
 
   #[test]
   fn boundary_term_interval_endpoints() {

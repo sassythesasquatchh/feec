@@ -1,18 +1,15 @@
 use common::linalg::nalgebra::Vector;
-use ddf::cochain::{cochain_projection, Cochain};
+use ddf::cochain::cochain_projection;
 use exterior::field::DiffFormClosure;
 use formoniq::{
   fe::fe_l2_error, io::write_cochain_vtk, operators::InnerProductWeightClosure,
   problems::laplace_beltrami,
 };
 use manifold::gen::cartesian::CartesianMeshInfo;
-use manifold::{
-  geometry::coord::CoordRef,
-  io::{save_coords_to_file, save_skeleton_to_file},
-};
-use std::collections::{HashMap, HashSet};
+use manifold::geometry::coord::CoordRef;
+use std::collections::HashSet;
 use std::f64::consts::PI;
-use std::{fs, io::Write};
+use std::fs;
 
 fn main() {
   tracing_subscriber::fmt::init();

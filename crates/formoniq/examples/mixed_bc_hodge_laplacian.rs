@@ -1,4 +1,4 @@
-use ddf::cochain::{cochain_projection, partial_cochain_projection, Cochain};
+use ddf::cochain::{cochain_projection, partial_cochain_projection};
 use formoniq::{
   assemble::assemble_boundary_integral_term,
   io::{write_1form_vector_field_vtk, write_cochain, write_cochain_vtk},
@@ -7,7 +7,7 @@ use formoniq::{
 use manifold::topology::handle::KSimplexIdx;
 
 use {
-  common::{linalg::nalgebra::Vector, util::algebraic_convergence_rate},
+  common::linalg::nalgebra::Vector,
   exterior::{field::DiffFormClosure, ExteriorElement},
   formoniq::{
     assemble::assemble_galvec, fe::fe_l2_error, operators::SourceElVec, problems::hodge_laplace,
@@ -15,7 +15,7 @@ use {
   manifold::{gen::cartesian::CartesianMeshInfo, geometry::coord::CoordRef},
 };
 
-use std::{collections::HashSet, f64::consts::PI, fs, io::Write};
+use std::{collections::HashSet, f64::consts::PI, fs};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt::init();
