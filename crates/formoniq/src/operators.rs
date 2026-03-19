@@ -914,7 +914,7 @@ where
 {
   source: &'a F,
   mesh_coords: &'a MeshCoords,
-  qr: SimplexQuadRule,
+  qr: Option<SimplexQuadRule>,
   weight: Option<&'a InnerProductWeightClosure<T>>,
 }
 impl<'a, F, T> SourceElVec<'a, F, T>
@@ -937,7 +937,6 @@ where
     qr: Option<SimplexQuadRule>,
     weight: Option<&'a InnerProductWeightClosure<T>>,
   ) -> Self {
-    let qr = qr.unwrap_or(SimplexQuadRule::barycentric(source.dim_intrinsic()));
     Self {
       source,
       mesh_coords,
@@ -965,9 +964,23 @@ where
   }
   fn eval(&self, geometry: &SimplexLengths, topology: &Simplex) -> ElVec {
     let cell_coords = SimplexCoords::from_simplex_and_coords(topology, self.mesh_coords);
-
-    let dim = self.source.dim_intrinsic();
+    let dim = cell_coords.dim_intrinsic();
+    let source_is_ambient = self.source.dim_ambient() == cell_coords.dim_ambient();
+    let source_is_intrinsic =
+      self.source.dim_ambient() == dim && cell_coords.dim_ambient() != cell_coords.dim_intrinsic();
+    assert!(
+      source_is_ambient || source_is_intrinsic,
+      "Source field ambient dimension {} is incompatible with cell dimensions ({}, {}).",
+      self.source.dim_ambient(),
+      cell_coords.dim_intrinsic(),
+      cell_coords.dim_ambient()
+    );
     let grade = self.grade();
+    let qr = self
+      .qr
+      .clone()
+      .unwrap_or_else(|| SimplexQuadRule::barycentric(dim));
+    assert_eq!(qr.dim(), dim);
     let dof_simps: Vec<_> = standard_subsimps(dim, grade).collect();
     let whitneys: Vec<_> = dof_simps
       .iter()
@@ -981,10 +994,11 @@ where
     for (iwhitney, whitney) in whitneys.iter().enumerate() {
       let inner_pointwise = |local: CoordRef| {
         let global = cell_coords.local2global(local);
-        let ref_source = self
-          .source
-          .at_point(&global)
-          .precompose_form(&cell_coords.linear_transform());
+        let ref_source = if source_is_ambient {
+          cell_coords.pullback_form(&self.source.at_point(&global))
+        } else {
+          self.source.at_point(global.as_view())
+        };
 
         let source_coeffs = ref_source.coeffs();
 
@@ -996,7 +1010,7 @@ where
 
         inner.inner(weighted_source, whitney.at_point(local).coeffs())
       };
-      let value = self.qr.integrate_local(&inner_pointwise, geometry.vol());
+      let value = qr.integrate_local(&inner_pointwise, geometry.vol());
       elvec[iwhitney] = value;
     }
     elvec

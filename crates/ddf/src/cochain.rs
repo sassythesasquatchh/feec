@@ -190,12 +190,21 @@ pub fn integrate_form_simplex(
   qr: Option<&SimplexQuadRule>,
 ) -> f64 {
   let dim_intrinsic = simplex.dim_intrinsic();
+  let form_is_ambient = form.dim_ambient() == simplex.dim_ambient();
+  let form_is_intrinsic =
+    form.dim_ambient() == dim_intrinsic && simplex.dim_ambient() != dim_intrinsic;
+  assert!(form_is_ambient || form_is_intrinsic);
+  assert_eq!(form.grade(), dim_intrinsic);
 
   let multivector = simplex.spanning_multivector();
   let f = |coord: CoordRef| {
-    form
-      .at_point(simplex.local2global(coord).as_view())
-      .apply_form_to_vector(&multivector)
+    let global = simplex.local2global(coord);
+    let ambient_form = if form_is_ambient {
+      form.at_point(global.as_view())
+    } else {
+      simplex.lift_form(&form.at_point(global.as_view()))
+    };
+    ambient_form.apply_form_to_vector(&multivector)
   };
   if let Some(qr) = qr {
     qr.integrate_local(&f, refsimp_vol(dim_intrinsic))

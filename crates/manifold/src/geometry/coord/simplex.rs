@@ -7,6 +7,7 @@ use crate::{
   topology::{handle::SimplexHandle, simplex::Simplex},
   Dim,
 };
+use exterior::ExteriorElement;
 
 use approx::assert_relative_eq;
 use common::{
@@ -128,6 +129,16 @@ impl SimplexCoords {
     global: impl Into<CoTangentVectorRef<'a>>,
   ) -> CoTangentVector {
     global.into() * self.linear_transform()
+  }
+
+  pub fn pullback_form(&self, global_form: &ExteriorElement) -> ExteriorElement {
+    assert_eq!(global_form.dim(), self.dim_ambient());
+    global_form.precompose_form(&self.linear_transform())
+  }
+
+  pub fn lift_form(&self, local_form: &ExteriorElement) -> ExteriorElement {
+    assert_eq!(local_form.dim(), self.dim_intrinsic());
+    local_form.precompose_form(&self.inv_linear_transform())
   }
 
   pub fn affine_transform(&self) -> AffineTransform {
@@ -264,6 +275,7 @@ impl SimplexHandleExt for SimplexHandle<'_> {
 #[cfg(test)]
 mod test {
   use super::*;
+  use exterior::ExteriorElement;
 
   #[test]
   fn standard_barys() {
@@ -289,5 +301,28 @@ mod test {
         assert_eq!(computed.row(ibary), expected);
       }
     }
+  }
+
+  #[test]
+  fn pullback_and_lift_roundtrip_embedded_covector() {
+    let coords = SimplexCoords::new(na::dmatrix![
+      0.0, 1.0, 0.0;
+      0.0, 0.0, 1.0;
+      0.0, 0.0, 0.0
+    ]);
+    let global = ExteriorElement::line(na::dvector![2.0, -1.0, 4.0]);
+
+    let local = coords.pullback_form(&global);
+    assert_eq!(local.dim(), 2);
+    assert_eq!(local.grade(), 1);
+    assert_eq!(local.coeffs()[0], 2.0);
+    assert_eq!(local.coeffs()[1], -1.0);
+
+    let lifted = coords.lift_form(&local);
+    assert_eq!(lifted.dim(), 3);
+    assert_eq!(lifted.grade(), 1);
+    assert_eq!(lifted.coeffs()[0], 2.0);
+    assert_eq!(lifted.coeffs()[1], -1.0);
+    assert_eq!(lifted.coeffs()[2], 0.0);
   }
 }

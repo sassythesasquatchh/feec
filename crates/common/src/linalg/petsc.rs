@@ -12,13 +12,107 @@ const PETSC_SOLVER_ENV: &str = "PETSC_SOLVER_PATH";
 
 fn petsc_solver_path() -> PathBuf {
   if let Ok(path) = std::env::var(PETSC_SOLVER_ENV) {
-    return PathBuf::from(path);
+    let path = resolve_petsc_solver_path(PathBuf::from(path));
+    if petsc_solver_binaries_exist(&path) {
+      return path;
+    }
   }
 
-  Path::new(env!("CARGO_MANIFEST_DIR"))
-    .join("..")
-    .join("..")
-    .join("petsc-solver")
+  if let Ok(current_exe) = std::env::current_exe() {
+    let current_exe = canonicalize_if_possible(current_exe);
+    if let Some(path) = search_petsc_solver_from(&current_exe) {
+      return path;
+    }
+  }
+
+  if let Ok(current_dir) = std::env::current_dir() {
+    let current_dir = canonicalize_if_possible(current_dir);
+    if let Some(path) = search_petsc_solver_from(&current_dir) {
+      return path;
+    }
+  }
+
+  let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+  let path = search_petsc_solver_from(manifest_dir)
+    .unwrap_or_else(|| manifest_dir.join("..").join("..").join("petsc-solver"));
+
+  canonicalize_if_possible(path)
+}
+
+fn petsc_solver_binaries_exist(path: &Path) -> bool {
+  ["ghiep.out", "ghep_reduced.out", "hils.out"]
+    .iter()
+    .all(|binary| path.join(binary).exists())
+}
+
+fn resolve_petsc_solver_path(path: PathBuf) -> PathBuf {
+  if path.is_absolute() {
+    return canonicalize_if_possible(path);
+  }
+
+  if petsc_solver_binaries_exist(&path) {
+    return canonicalize_if_possible(path);
+  }
+
+  search_relative_path_upwards(&path).unwrap_or(path)
+}
+
+fn search_petsc_solver_from(start: &Path) -> Option<PathBuf> {
+  start
+    .ancestors()
+    .map(|ancestor| ancestor.join("petsc-solver"))
+    .find(|path| petsc_solver_binaries_exist(path))
+    .or_else(|| {
+      start
+        .ancestors()
+        .map(|ancestor| ancestor.join("petsc-solver"))
+        .find(|path| path.exists())
+    })
+    .map(canonicalize_if_possible)
+}
+
+fn search_relative_path_upwards(relative_path: &Path) -> Option<PathBuf> {
+  let mut starts = Vec::new();
+
+  if let Ok(current_exe) = std::env::current_exe() {
+    starts.push(canonicalize_if_possible(current_exe));
+  }
+
+  if let Ok(current_dir) = std::env::current_dir() {
+    starts.push(canonicalize_if_possible(current_dir));
+  }
+
+  for start in starts {
+    if let Some(path) = start
+      .ancestors()
+      .map(|ancestor| ancestor.join(relative_path))
+      .find(|path| petsc_solver_binaries_exist(path))
+    {
+      return Some(canonicalize_if_possible(path));
+    }
+  }
+
+  None
+}
+
+fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
+  std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn run_petsc_command<S>(binary: &Path, current_dir: &Path, args: &[S]) -> std::process::ExitStatus
+where
+  S: AsRef<std::ffi::OsStr>,
+{
+  std::process::Command::new(binary)
+    .current_dir(current_dir)
+    .args(args)
+    .status()
+    .unwrap_or_else(|error| {
+      panic!(
+        "failed to launch PETSc helper {:?} in {:?}: {}",
+        binary, current_dir, error
+      )
+    })
 }
 
 const PETSC_MAT_FILE_CLASSID: i32 = 1211216;
@@ -251,22 +345,17 @@ pub fn petsc_ghiep_with_which(
   which: GhiepWhich,
 ) -> (Vector, Matrix) {
   let solver_path = petsc_solver_path();
-  let path = solver_path.join("in");
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).unwrap();
-  }
+  std::fs::create_dir_all(solver_path.join("in")).unwrap();
+  std::fs::create_dir_all(solver_path.join("out")).unwrap();
 
+  let path = solver_path.join("in");
   petsc_write_matrix(lhs, path.join("A.bin").to_str().unwrap()).unwrap();
   petsc_write_matrix(rhs, path.join("B.bin").to_str().unwrap()).unwrap();
 
-  let binary = "./ghiep.out";
+  let binary = solver_path.join("ghiep.out");
   let args = ghiep_args(which, neigen_values);
 
-  let status = std::process::Command::new(binary)
-    .current_dir(&solver_path)
-    .args(&args)
-    .status()
-    .unwrap();
+  let status = run_petsc_command(&binary, &solver_path, &args);
   assert!(status.success());
 
   let eigenvals =
@@ -314,14 +403,10 @@ pub fn petsc_ghep_reduced_with_which(
   petsc_write_matrix(mkm1, in_path.join("Mkm1.bin").to_str().unwrap()).unwrap();
   petsc_write_matrix(mk, in_path.join("Mk.bin").to_str().unwrap()).unwrap();
 
-  let binary = "./ghep_reduced.out";
+  let binary = solver_path.join("ghep_reduced.out");
   let args = ghep_reduced_args(which, neigen_values, mass_solve);
 
-  let status = std::process::Command::new(binary)
-    .current_dir(&solver_path)
-    .args(&args)
-    .status()
-    .unwrap();
+  let status = run_petsc_command(&binary, &solver_path, &args);
   assert!(status.success());
 
   let eigenvals =
@@ -413,52 +498,70 @@ pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector, has_harmonics: bool) ->
   petsc_write_matrix(lhs, in_path.join("A.bin").to_str().unwrap()).unwrap();
   petsc_write_vector(rhs, in_path.join("b.bin").to_str().unwrap()).unwrap();
 
-  let binary = "./hils.out";
+  let binary = path.join("hils.out");
 
-  // Keep current behavior (no args) unless harmonics are present.
-  let args: Vec<&str> = if has_harmonics {
-    vec![
-      // Outer Krylov
-      "-ksp_type",
-      "gmres",
-      "-ksp_max_it",
-      "1000",
-      "-ksp_rtol",
-      "1e-9",
-      "-ksp_error_if_not_converged",
-      // Saddle-point aware preconditioner (Schur complement)
-      "-pc_type",
-      "fieldsplit",
-      "-pc_fieldsplit_type",
-      "schur",
-      "-pc_fieldsplit_detect_saddle_point",
-      // Use upper factorization
-      "-pc_fieldsplit_schur_fact_type",
-      "upper",
-      // How to (approximately) solve the (non-saddle) block
-      "-fieldsplit_0_ksp_type",
-      "preonly",
-      "-fieldsplit_0_pc_type",
-      "ilu",
-      // How to handle the Schur block
-      "-fieldsplit_1_ksp_type",
-      "preonly",
-      "-fieldsplit_1_pc_type",
-      "none",
-    ]
-  } else {
-    Vec::new()
-  };
+  let preferred_args = harmonic_saddle_point_args(has_harmonics);
+  let mut status = run_petsc_command(&binary, &path, &preferred_args);
 
-  let status = std::process::Command::new(binary)
-    .current_dir(&path)
-    .args(args)
-    .status()
-    .unwrap();
+  if has_harmonics && !status.success() {
+    eprintln!(
+      "PETSc harmonic saddle-point solve failed with fieldsplit preconditioning; retrying with a direct LU factorization."
+    );
+
+    status = run_petsc_command(&binary, &path, &direct_saddle_point_args());
+  }
+
   assert!(status.success());
 
   let out_path = path.join("out");
   petsc_read_vector(out_path.join("x.bin").to_str().unwrap()).unwrap()
+}
+
+fn harmonic_saddle_point_args(has_harmonics: bool) -> Vec<&'static str> {
+  if !has_harmonics {
+    return Vec::new();
+  }
+
+  vec![
+    // Outer Krylov
+    "-ksp_type",
+    "gmres",
+    "-ksp_max_it",
+    "1000",
+    "-ksp_rtol",
+    "1e-9",
+    "-ksp_error_if_not_converged",
+    // Saddle-point aware preconditioner (Schur complement)
+    "-pc_type",
+    "fieldsplit",
+    "-pc_fieldsplit_type",
+    "schur",
+    "-pc_fieldsplit_detect_saddle_point",
+    // Use upper factorization
+    "-pc_fieldsplit_schur_fact_type",
+    "upper",
+    // How to (approximately) solve the (non-saddle) block
+    "-fieldsplit_0_ksp_type",
+    "preonly",
+    "-fieldsplit_0_pc_type",
+    "ilu",
+    // How to handle the Schur block
+    "-fieldsplit_1_ksp_type",
+    "preonly",
+    "-fieldsplit_1_pc_type",
+    "none",
+  ]
+}
+
+fn direct_saddle_point_args() -> Vec<&'static str> {
+  vec![
+    "-ksp_type",
+    "preonly",
+    "-pc_type",
+    "lu",
+    "-pc_factor_mat_solver_type",
+    "mumps",
+  ]
 }
 
 #[cfg(test)]
@@ -466,12 +569,47 @@ mod tests {
   use super::*;
 
   #[test]
-  fn petsc_solver_path_defaults_to_submodule_dir() {
+  fn petsc_solver_path_defaults_to_directory_with_solver_binaries() {
     let path = petsc_solver_path();
+    let current_exe = std::env::current_exe().ok();
+    let current_dir = std::env::current_dir().ok();
     assert_eq!(
       path.file_name().and_then(|p| p.to_str()),
       Some("petsc-solver")
     );
+    assert!(
+      path.join("ghiep.out").exists(),
+      "solver path: {:?}, current_exe: {:?}, current_dir: {:?}",
+      path,
+      current_exe,
+      current_dir
+    );
+    assert!(
+      path.join("ghep_reduced.out").exists(),
+      "solver path: {:?}, current_exe: {:?}, current_dir: {:?}",
+      path,
+      current_exe,
+      current_dir
+    );
+    assert!(
+      path.join("hils.out").exists(),
+      "solver path: {:?}, current_exe: {:?}, current_dir: {:?}",
+      path,
+      current_exe,
+      current_dir
+    );
+  }
+
+  #[test]
+  fn relative_petsc_solver_override_resolves_to_binary_directory() {
+    let path = resolve_petsc_solver_path(PathBuf::from("feec/petsc-solver"));
+    assert!(path.join("ghiep.out").exists(), "resolved path: {:?}", path);
+    assert!(
+      path.join("ghep_reduced.out").exists(),
+      "resolved path: {:?}",
+      path
+    );
+    assert!(path.join("hils.out").exists(), "resolved path: {:?}", path);
   }
 
   #[test]
@@ -506,5 +644,28 @@ mod tests {
     assert!(args.iter().any(|arg| arg == "cg"));
     assert!(args.iter().any(|arg| arg == "-mkm1_pc_type"));
     assert!(args.iter().any(|arg| arg == "jacobi"));
+  }
+
+  #[test]
+  fn harmonic_saddle_point_args_without_harmonics_are_empty() {
+    let args = harmonic_saddle_point_args(false);
+    assert!(args.is_empty());
+  }
+
+  #[test]
+  fn harmonic_saddle_point_args_with_harmonics_use_fieldsplit() {
+    let args = harmonic_saddle_point_args(true);
+    assert!(args.iter().any(|arg| *arg == "-pc_type"));
+    assert!(args.iter().any(|arg| *arg == "fieldsplit"));
+    assert!(args.iter().any(|arg| *arg == "-ksp_error_if_not_converged"));
+  }
+
+  #[test]
+  fn direct_saddle_point_args_use_lu_with_mumps() {
+    let args = direct_saddle_point_args();
+    assert!(args.iter().any(|arg| *arg == "-pc_type"));
+    assert!(args.iter().any(|arg| *arg == "lu"));
+    assert!(args.iter().any(|arg| *arg == "-pc_factor_mat_solver_type"));
+    assert!(args.iter().any(|arg| *arg == "mumps"));
   }
 }

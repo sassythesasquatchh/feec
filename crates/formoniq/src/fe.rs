@@ -1,20 +1,15 @@
-use manifold::topology::handle::SimplexHandle;
-
 use crate::{
   assemble::assemble_galmat,
   operators::{CodifDifElmat, HodgeMassElmat},
 };
 
 use {
-  common::{
-    gramian::Gramian,
-    linalg::nalgebra::{quadratic_form_sparse, CsrMatrix},
-  },
+  common::linalg::nalgebra::{quadratic_form_sparse, CsrMatrix},
   ddf::{cochain::Cochain, whitney::form::WhitneyForm},
   exterior::{field::ExteriorField, term::multi_gramian},
   manifold::{
     geometry::{
-      coord::{mesh::MeshCoords, quadrature::SimplexQuadRule, CoordRef},
+      coord::{mesh::MeshCoords, quadrature::SimplexQuadRule, simplex::SimplexHandleExt},
       metric::mesh::MeshLengths,
     },
     topology::complex::Complex,
@@ -50,9 +45,33 @@ pub fn fe_l2_error<E: ExteriorField>(
   let dim = topology.dim();
   let qr = SimplexQuadRule::order3(dim);
   let fe_whitney = WhitneyForm::new(fe_cochain.clone(), topology, coords);
-  let inner = multi_gramian(&Gramian::standard(dim), fe_cochain.dim());
-  let error_pointwise = |x: CoordRef, cell: SimplexHandle| {
-    inner.norm_sq((exact.at_point(x) - fe_whitney.eval_known_cell(cell, x)).coeffs())
-  };
-  qr.integrate_mesh(&error_pointwise, topology, coords).sqrt()
+  let mut error_sq = 0.0;
+  for cell in topology.cells().handle_iter() {
+    let cell_coords = cell.coord_simplex(coords);
+    let exact_is_ambient = exact.dim_ambient() == cell_coords.dim_ambient();
+    let exact_is_intrinsic = exact.dim_ambient() == cell_coords.dim_intrinsic()
+      && cell_coords.dim_ambient() != cell_coords.dim_intrinsic();
+    assert!(
+      exact_is_ambient || exact_is_intrinsic,
+      "Exact field ambient dimension {} is incompatible with cell dimensions ({}, {}).",
+      exact.dim_ambient(),
+      cell_coords.dim_intrinsic(),
+      cell_coords.dim_ambient()
+    );
+    let inner = multi_gramian(&cell_coords.metric_tensor().inverse(), fe_cochain.dim());
+    error_sq += qr.integrate_local(
+      &|local| {
+        let global = cell_coords.local2global(local);
+        let exact_local = if exact_is_ambient {
+          cell_coords.pullback_form(&exact.at_point(global.as_view()))
+        } else {
+          exact.at_point(global.as_view())
+        };
+        let discrete_local = cell_coords.pullback_form(&fe_whitney.eval_known_cell(cell, &global));
+        inner.norm_sq((exact_local - discrete_local).coeffs())
+      },
+      cell_coords.vol(),
+    );
+  }
+  error_sq.sqrt()
 }

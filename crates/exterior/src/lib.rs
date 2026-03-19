@@ -268,6 +268,7 @@ impl MultiForm {
   ///
   /// Needed for pullback of differential k-form.
   pub fn precompose_form(&self, linear_map: &Matrix) -> Self {
+    let dim_out = linear_map.ncols();
     self
       .basis_iter()
       .map(|(coeff, basis)| {
@@ -277,7 +278,7 @@ impl MultiForm {
               .iter()
               .map(|i| MultiForm::line(linear_map.row(i).transpose())),
           )
-          .unwrap_or(ExteriorElement::one(self.dim))
+          .unwrap_or(ExteriorElement::one(dim_out))
       })
       .sum()
   }
@@ -362,5 +363,19 @@ mod tests {
     let computed = a.wedge(&b);
     let expected = ExteriorElement::zero(2, 0);
     assert_eq!(computed.coeffs, expected.coeffs);
+  }
+
+  #[test]
+  fn scalar_precompose_uses_output_dimension() {
+    let scalar = ExteriorElement::scalar(2.0, 3);
+    let linear = na::dmatrix![
+      1.0, 0.0;
+      0.0, 1.0;
+      0.0, 0.0
+    ];
+    let pulled = scalar.precompose_form(&linear);
+    assert_eq!(pulled.dim(), 2);
+    assert_eq!(pulled.grade(), 0);
+    assert_eq!(pulled.coeffs()[0], 2.0);
   }
 }

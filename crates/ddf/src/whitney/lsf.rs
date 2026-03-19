@@ -62,9 +62,9 @@ impl WhitneyLsf {
 
   /// The constant exterior derivative of the Whitney LSF.
   pub fn dif(&self) -> MultiForm {
-    let dim = self.cell_coords.dim_intrinsic();
+    let dim = self.cell_coords.dim_ambient();
     let grade = self.grade();
-    if grade == dim {
+    if grade == self.cell_coords.dim_intrinsic() {
       return MultiForm::zero(dim, grade + 1);
     }
     factorialf(grade + 1) * MultiForm::wedge_big(self.difbarys()).unwrap()

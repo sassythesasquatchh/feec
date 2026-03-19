@@ -9,7 +9,7 @@ use common::{
 };
 use ddf::CoordSimplexExt;
 use exterior::{
-  field::{DiffFormClosure, ExteriorField},
+  field::{DifferentialMultiForm, ExteriorField},
   ExteriorGrade,
 };
 use itertools::Itertools;
@@ -482,11 +482,11 @@ where
 }
 // Assemble a boundary (Neumann) Galerkin vector
 // $\int_{\Gamma_N} \mathrm{tr}\, \omega \wedge g_N$ on a selectable subset of boundary facets.
-pub fn assemble_boundary_integral_term(
+pub fn assemble_boundary_integral_term<F: DifferentialMultiForm>(
   topology: &Complex,
   coords: &MeshCoords,
   test_grade: ExteriorGrade,
-  boundary_data: &DiffFormClosure,
+  boundary_data: &F,
   qr: Option<SimplexQuadRule>,
   boundary_selector: &dyn Fn(KSimplexIdx) -> bool,
 ) -> GalVec {
@@ -549,11 +549,11 @@ pub fn assemble_boundary_integral_term(
   galvec
 }
 
-fn boundary_elvec_for_facet(
+fn boundary_elvec_for_facet<F: DifferentialMultiForm>(
   test_grade: ExteriorGrade,
   facet: SimplexHandle,
   facet_coords: &SimplexCoords,
-  boundary_data: &DiffFormClosure,
+  boundary_data: &F,
   qr: &SimplexQuadRule,
   orientation_sign: f64,
 ) -> Vector {
@@ -572,7 +572,20 @@ fn boundary_elvec_for_facet(
     let f = |xi: CoordRef| {
       let global = facet_coords.local2global(xi);
       let phi = lsf.at_point(global.as_view());
-      let g = boundary_data.at_point(global.as_view());
+      let g = if boundary_data.dim_ambient() == facet_coords.dim_ambient() {
+        boundary_data.at_point(global.as_view())
+      } else if boundary_data.dim_ambient() == facet_coords.dim_intrinsic()
+        && facet_coords.dim_ambient() != facet_coords.dim_intrinsic()
+      {
+        facet_coords.lift_form(&boundary_data.at_point(global.as_view()))
+      } else {
+        panic!(
+          "Boundary data ambient dimension {} is incompatible with facet dimensions ({}, {}).",
+          boundary_data.dim_ambient(),
+          facet_coords.dim_intrinsic(),
+          facet_coords.dim_ambient()
+        );
+      };
       let integrand = phi.wedge(&g);
       orientation_sign * integrand.apply_form_to_vector(&multivector)
     };
@@ -600,9 +613,11 @@ fn boundary_orientation_sign(facet: SimplexHandle, coords: &MeshCoords) -> f64 {
     .as_f64();
 
   let parent_coords = SimplexCoords::from_simplex_and_coords(&parent_cell, coords);
-  let cell_orientation = parent_coords.orientation().as_f64();
-
-  facet_sign * cell_orientation
+  if parent_coords.is_same_dim() {
+    facet_sign * parent_coords.orientation().as_f64()
+  } else {
+    facet_sign
+  }
 }
 
 pub fn drop_boundary_dofs_galmat(complex: &Complex, galmat: &mut GalMat) {
@@ -854,6 +869,7 @@ pub fn fix_dofs_coeff_alt(dof_coeffs: &[(DofIdx, f64)], galmat: &mut GalMat, gal
 mod tests {
   use super::*;
   use approx::assert_abs_diff_eq;
+  use exterior::field::DiffFormClosure;
   use manifold::geometry::coord::mesh::standard_coord_complex;
 
   #[test]

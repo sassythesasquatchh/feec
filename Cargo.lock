@@ -557,6 +557,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "common",
+ "exterior",
  "indexmap",
  "itertools",
  "mshio",

@@ -4,21 +4,10 @@ use std::{
   path::Path,
 };
 
-use common::linalg::nalgebra::Vector;
-use ddf::{
-  cochain::Cochain,
-  whitney::{form::WhitneyForm, lsf::WhitneyLsf},
-};
-use exterior::field::ExteriorField;
+use ddf::{cochain::Cochain, whitney::form::WhitneyForm};
 use manifold::{
-  geometry::coord::{
-    mesh::MeshCoords,
-    simplex::{barycenter_local, SimplexCoords},
-  },
-  topology::{
-    complex::Complex,
-    handle::{SimplexHandle, SkeletonHandle},
-  },
+  geometry::coord::{mesh::MeshCoords, simplex::SimplexCoords},
+  topology::{complex::Complex, handle::SkeletonHandle},
 };
 
 pub fn write_cochain(path: &str, cochain: &Cochain) -> std::io::Result<()> {
@@ -238,15 +227,12 @@ pub fn write_cochain_vtk(
 ///
 /// - The provided cochain must have degree 1.
 /// - The vectors are piecewise constant: one vector per top-dimensional cell, evaluated at its barycenter.
-/// - For embedded meshes (`topology.dim() < coords.dim()`), we evaluate the Whitney form in local
-///   cell coordinates and lift the result to ambient coordinates via the cell pseudoinverse transpose.
-pub fn write_1form_vector_field_vtk(
-  path: impl AsRef<Path>,
+/// - Whitney evaluation is ambient-valued, so embedded meshes are handled without a special path.
+pub fn sample_1form_cell_vectors(
   coords: &MeshCoords,
   topology: &Complex,
   cochain: &Cochain,
-  data_name: &str,
-) -> io::Result<()> {
+) -> io::Result<Vec<[f64; 3]>> {
   if cochain.dim() != 1 {
     return Err(io::Error::new(
       io::ErrorKind::Other,
@@ -285,24 +271,91 @@ pub fn write_1form_vector_field_vtk(
     ));
   }
 
+  let geom_skeleton = topology.skeleton(topo_dim);
+  let whitney = WhitneyForm::new(cochain.clone(), topology, coords);
+
+  let mut vectors = Vec::with_capacity(geom_skeleton.len());
+  for cell in geom_skeleton.handle_iter() {
+    let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
+    let bary = cell_coords.barycenter();
+    let value = whitney.eval_known_cell(cell, &bary).into_grade1();
+
+    vectors.push([
+      value[0],
+      if value.len() > 1 { value[1] } else { 0.0 },
+      if value.len() > 2 { value[2] } else { 0.0 },
+    ]);
+  }
+
+  Ok(vectors)
+}
+
+/// Write vector and scalar fields defined on top-dimensional cells into a single VTK file.
+pub fn write_top_cell_vtk_fields(
+  path: impl AsRef<Path>,
+  coords: &MeshCoords,
+  topology: &Complex,
+  vector_fields: &[(&str, &[[f64; 3]])],
+  scalar_fields: &[(&str, &[f64])],
+) -> io::Result<()> {
+  if vector_fields.is_empty() && scalar_fields.is_empty() {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      "at least one top-cell vector or scalar field is required",
+    ));
+  }
+
+  if coords.dim() > 3 {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      "VTK export supports up to 3D coordinates",
+    ));
+  }
+
+  let topo_dim = topology.dim();
   let cell_type = vtk_cell_type(topo_dim).ok_or_else(|| {
     io::Error::new(
       io::ErrorKind::Other,
       format!("Unsupported cell dimension {topo_dim}"),
     )
   })?;
-
   let geom_skeleton = topology.skeleton(topo_dim);
+  let ncells = geom_skeleton.len();
+  let nverts_per_cell = topo_dim + 1;
+
+  for (name, vectors) in vector_fields {
+    if vectors.len() != ncells {
+      return Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!(
+          "Vector field length {} does not match top-cell count {} for {name}",
+          vectors.len(),
+          ncells,
+        ),
+      ));
+    }
+  }
+  for (name, field) in scalar_fields {
+    if field.len() != ncells {
+      return Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!(
+          "Scalar field length {} does not match top-cell count {} for {name}",
+          field.len(),
+          ncells,
+        ),
+      ));
+    }
+  }
 
   let file = File::create(path)?;
   let mut w = BufWriter::new(file);
 
   writeln!(w, "# vtk DataFile Version 4.2")?;
-  writeln!(w, "{data_name}")?;
+  writeln!(w, "top-cell fields")?;
   writeln!(w, "ASCII")?;
   writeln!(w, "DATASET UNSTRUCTURED_GRID")?;
 
-  // Points
   writeln!(w, "POINTS {} double", coords.nvertices())?;
   for coord in coords.coord_iter() {
     let x = coord[0];
@@ -311,9 +364,6 @@ pub fn write_1form_vector_field_vtk(
     writeln!(w, "{x:.6} {y:.6} {z:.6}")?;
   }
 
-  // Cells
-  let nverts_per_cell = topo_dim + 1;
-  let ncells = geom_skeleton.len();
   writeln!(w, "CELLS {} {}", ncells, ncells * (nverts_per_cell + 1))?;
   write_skeleton_cells(&mut w, &geom_skeleton)?;
 
@@ -322,60 +372,39 @@ pub fn write_1form_vector_field_vtk(
     writeln!(w, "{cell_type}")?;
   }
 
-  // Data: piecewise-constant vectors per top cell
-  let whitney =
-    (topo_dim == coords.dim()).then(|| WhitneyForm::new(cochain.clone(), topology, coords));
-
   writeln!(w, "CELL_DATA {}", ncells)?;
-  writeln!(w, "VECTORS {} double", data_name)?;
-
-  for cell in geom_skeleton.handle_iter() {
-    let value = if let Some(whitney) = &whitney {
-      let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
-      let bary = cell_coords.barycenter();
-      whitney.eval_known_cell(cell, &bary).into_grade1()
-    } else {
-      eval_embedded_1form_cell_vector(cell, coords, cochain)?
-    };
-
-    let vx = value[0];
-    let vy = if value.len() > 1 { value[1] } else { 0.0 };
-    let vz = if value.len() > 2 { value[2] } else { 0.0 };
-    writeln!(w, "{vx:.12} {vy:.12} {vz:.12}")?;
+  for (name, vectors) in vector_fields {
+    writeln!(w, "VECTORS {} double", name)?;
+    for [vx, vy, vz] in vectors.iter().copied() {
+      writeln!(w, "{vx:.12} {vy:.12} {vz:.12}")?;
+    }
+  }
+  for (name, field) in scalar_fields {
+    writeln!(w, "SCALARS {} double 1", name)?;
+    writeln!(w, "LOOKUP_TABLE default")?;
+    for value in field.iter().copied() {
+      writeln!(w, "{value:.12}")?;
+    }
   }
 
   Ok(())
 }
 
-fn eval_embedded_1form_cell_vector(
-  cell: SimplexHandle<'_>,
+pub fn write_1form_vector_field_vtk(
+  path: impl AsRef<Path>,
   coords: &MeshCoords,
+  topology: &Complex,
   cochain: &Cochain,
-) -> io::Result<Vector> {
-  let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
-  let intrinsic_dim = cell_coords.dim_intrinsic();
-  let ambient_dim = cell_coords.dim_ambient();
-  if intrinsic_dim >= ambient_dim {
-    return Err(io::Error::new(
-      io::ErrorKind::Other,
-      format!(
-        "Expected embedded cell with intrinsic dim < ambient dim, got {} and {}",
-        intrinsic_dim, ambient_dim
-      ),
-    ));
-  }
-
-  let bary_local = barycenter_local(intrinsic_dim);
-  let mut local_value = Vector::zeros(intrinsic_dim);
-  for dof_simp in cell.mesh_subsimps(1) {
-    let local_dof_simp = dof_simp.relative_to(&cell);
-    let lsf = WhitneyLsf::standard(intrinsic_dim, local_dof_simp);
-    let lsf_value = lsf.at_point(&bary_local).into_grade1();
-    local_value += cochain[dof_simp] * lsf_value;
-  }
-
-  let jacobian_pinv = cell_coords.inv_linear_transform();
-  Ok(jacobian_pinv.transpose() * local_value)
+  data_name: &str,
+) -> io::Result<()> {
+  let vectors = sample_1form_cell_vectors(coords, topology, cochain)?;
+  write_top_cell_vtk_fields(
+    path,
+    coords,
+    topology,
+    &[(data_name, vectors.as_slice())],
+    &[],
+  )
 }
 
 /// Write vector proxies for a 1-form as edge-aligned vectors (CELL_DATA on the 1-skeleton).
@@ -625,6 +654,51 @@ mod tests {
     assert_eq!(comps.len(), 3);
     assert!(comps.iter().all(|value| value.is_finite()));
     assert!(comps[2].abs() < 1e-10);
+
+    std::fs::remove_file(path).ok();
+  }
+
+  #[test]
+  fn sample_1form_cell_vectors_embedded_surface_smoke() {
+    let (topology, coords_2d) = standard_coord_complex(2);
+    let coords = coords_2d.embed_euclidean(3);
+    let edges = topology.skeleton(1);
+    let cochain = Cochain::new(1, Vector::from_element(edges.len(), 1.0));
+
+    let vectors = sample_1form_cell_vectors(&coords, &topology, &cochain).unwrap();
+    assert_eq!(vectors.len(), topology.cells().len());
+    assert!(vectors
+      .iter()
+      .flat_map(|vector| vector.iter())
+      .all(|value| value.is_finite()));
+  }
+
+  #[test]
+  fn write_top_cell_vtk_fields_writes_multiple_vectors_and_scalars() {
+    let mesh = CartesianMeshInfo::new_unit_scaled(2, 1, 1.0);
+    let (topology, coords) = mesh.compute_coord_complex();
+    let cell_count = topology.cells().len();
+    let mean_vectors = vec![[1.0, 0.0, 0.5]; cell_count];
+    let variance_vectors = vec![[0.25, 0.5, 0.75]; cell_count];
+    let magnitude = vec![1.5; cell_count];
+
+    let path = std::env::temp_dir().join("top_cell_fields.vtk");
+    write_top_cell_vtk_fields(
+      &path,
+      &coords,
+      &topology,
+      &[
+        ("mean_vector", mean_vectors.as_slice()),
+        ("variance_vector", variance_vectors.as_slice()),
+      ],
+      &[("magnitude", magnitude.as_slice())],
+    )
+    .unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("VECTORS mean_vector double"));
+    assert!(content.contains("VECTORS variance_vector double"));
+    assert!(content.contains("SCALARS magnitude double 1"));
 
     std::fs::remove_file(path).ok();
   }

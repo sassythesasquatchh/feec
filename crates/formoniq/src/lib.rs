@@ -6,3 +6,4 @@ pub mod fe;
 pub mod io;
 pub mod operators;
 pub mod problems;
+pub mod torus_convergence;
