@@ -160,6 +160,13 @@ fn assert_supported_nc1_dim(dim: Dim) {
   );
 }
 
+fn assert_supported_nc2_dim(dim: Dim) {
+  assert!(
+    dim == 3,
+    "NC2 support is implemented only for simplicial meshes with intrinsic dimension 3."
+  );
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn nc1_local_nedges(dim: Dim) -> usize {
   match dim {
@@ -202,6 +209,52 @@ fn nc1_local_dof_vertex(dim: Dim, local_dof: usize) -> usize {
   let local_edges: Vec<_> = standard_subsimps(dim, 1).collect();
   let edge = &local_edges[local_dof / 2];
   edge[local_dof % 2]
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn nc2_local_nfaces(dim: Dim) -> usize {
+  assert_supported_nc2_dim(dim);
+  4
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn nc2_local_ndofs(dim: Dim) -> usize {
+  3 * nc2_local_nfaces(dim)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn nc2_local_embedding_matrix(dim: Dim) -> Matrix {
+  assert_supported_nc2_dim(dim);
+
+  let nfaces = nc2_local_nfaces(dim);
+  let mut embedding = Matrix::zeros(nc2_local_ndofs(dim), nfaces);
+  for iface in 0..nfaces {
+    let group_start = 3 * iface;
+    for slot in 0..3 {
+      embedding[(group_start + slot, iface)] = 1.0;
+    }
+  }
+  embedding
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn nc2_local_projection_matrix(dim: Dim) -> Matrix {
+  (1.0 / 3.0) * nc2_local_embedding_matrix(dim).transpose()
+}
+
+fn nc2_local_basis_coeffs(dim: Dim, coord: CoordRef) -> Matrix {
+  assert_supported_nc2_dim(dim);
+
+  let x = coord[0];
+  let y = coord[1];
+  let z = coord[2];
+
+  2.0
+    * na::dmatrix![
+      x + y + z - 1.0, -x, -y, 0.0, 0.0, -z, 0.0, 0.0, z, 0.0, 0.0, -z;
+      0.0, 0.0, -y, x + y + z - 1.0, -x, -z, 0.0, -y, 0.0, 0.0, y, 0.0;
+      0.0, x, 0.0, 0.0, -x, 0.0, x + y + z - 1.0, -y, -z, -x, 0.0, 0.0;
+    ]
 }
 
 fn nc1_local_basis_coeffs(dim: Dim, coord: CoordRef) -> Matrix {
@@ -328,6 +381,170 @@ pub struct Nc1LumpedMassElmat<'a> {
   coords: Option<&'a MeshCoords>,
   qr: Option<SimplexQuadRule>,
   weight: Option<&'a InnerProductWeightClosure<f64>>,
+}
+
+/// Element matrix for the full first-order H(div)-analogue auxiliary 2-form space in 3D.
+///
+/// The local basis follows the projected BDM1/RT0 construction from the variational
+/// Yee-like scheme, expressed in 2-form coefficients ordered as (dx^dy, dx^dz, dy^dz).
+pub struct Nc2MassElmat<'a, T = f64>
+where
+  T: AddAssign + Mul<f64, Output = T> + ApplyWeight,
+{
+  dim: Dim,
+  coords: Option<&'a MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&'a InnerProductWeightClosure<T>>,
+}
+
+impl<'a, T: AddAssign + Mul<f64, Output = T> + ApplyWeight> Nc2MassElmat<'a, T> {
+  pub fn new_weighted(
+    dim: Dim,
+    coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: &'a InnerProductWeightClosure<T>,
+  ) -> Self {
+    assert_supported_nc2_dim(dim);
+    let qr = qr.unwrap_or(SimplexQuadRule::barycentric(dim));
+    Self::_new(dim, Some(coords), Some(qr), Some(weight))
+  }
+
+  fn _new(
+    dim: Dim,
+    coords: Option<&'a MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<&'a InnerProductWeightClosure<T>>,
+  ) -> Self {
+    assert_supported_nc2_dim(dim);
+    Self {
+      dim,
+      coords,
+      qr,
+      weight,
+    }
+  }
+
+  fn _eval(&self, geometry: &SimplexLengths, topology: Option<&Simplex>) -> Matrix {
+    assert_eq!(self.dim, geometry.dim());
+
+    let weight_to_apply = if let Some(weight) = &self.weight {
+      let topology =
+        topology.expect("Weighted Nc2MassElmat requires a cell (topology) to evaluate the weight.");
+      let qr = self
+        .qr
+        .as_ref()
+        .expect("Inner product weight provided, but no quadrature rule specified.");
+      let coords = self
+        .coords
+        .as_ref()
+        .expect("Inner product weight provided, but no mesh coordinates specified.");
+
+      Some(averaged_cell_weight(topology, coords, qr, weight))
+    } else {
+      None
+    };
+
+    let inner = multi_gramian(&geometry.to_metric_tensor().inverse(), 2);
+    let qr = SimplexQuadRule::order3(self.dim);
+    qr.integrate_local(
+      &|local: CoordRef| {
+        let basis_coeffs = nc2_local_basis_coeffs(self.dim, local);
+        inner.inner_mat(
+          &apply_optional_weight(weight_to_apply.as_ref(), &basis_coeffs),
+          &basis_coeffs,
+        )
+      },
+      geometry.vol(),
+    )
+  }
+}
+
+impl<'a> Nc2MassElmat<'a, f64> {
+  pub fn new(dim: Dim) -> Self {
+    Self::_new(dim, None, None, None)
+  }
+}
+
+impl<'a, T: AddAssign + Mul<f64, Output = T> + ApplyWeight> Nc2MassElmat<'a, T> {
+  pub fn eval(&self, geometry: &SimplexLengths) -> Matrix {
+    debug_assert!(self.weight.is_none());
+    self._eval(geometry, None)
+  }
+
+  pub fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> Matrix {
+    self._eval(geometry, Some(cell))
+  }
+}
+
+/// Element matrix for the mass-lumped auxiliary 2-form space in 3D.
+pub struct Nc2LumpedMassElmat<'a> {
+  dim: Dim,
+  coords: Option<&'a MeshCoords>,
+  qr: Option<SimplexQuadRule>,
+  weight: Option<&'a InnerProductWeightClosure<f64>>,
+}
+
+impl<'a> Nc2LumpedMassElmat<'a> {
+  pub fn new(dim: Dim) -> Self {
+    Self::_new(dim, None, None, None)
+  }
+
+  pub fn new_weighted(
+    dim: Dim,
+    coords: &'a MeshCoords,
+    qr: Option<SimplexQuadRule>,
+    weight: &'a InnerProductWeightClosure<f64>,
+  ) -> Self {
+    assert_supported_nc2_dim(dim);
+    let qr = qr.unwrap_or(SimplexQuadRule::barycentric(dim));
+    Self::_new(dim, Some(coords), Some(qr), Some(weight))
+  }
+
+  fn _new(
+    dim: Dim,
+    coords: Option<&'a MeshCoords>,
+    qr: Option<SimplexQuadRule>,
+    weight: Option<&'a InnerProductWeightClosure<f64>>,
+  ) -> Self {
+    assert_supported_nc2_dim(dim);
+    Self {
+      dim,
+      coords,
+      qr,
+      weight,
+    }
+  }
+
+  fn _eval(&self, geometry: &SimplexLengths, cell: Option<&Simplex>) -> Matrix {
+    assert_eq!(self.dim, geometry.dim());
+
+    let cell_weight = if let Some(weight) = self.weight {
+      let cell = cell.expect("Weighted Nc2LumpedMassElmat requires a cell (topology).");
+      scalar_cell_weight(cell, Some(weight), self.coords, self.qr.as_ref())
+    } else {
+      1.0
+    };
+
+    let inner = multi_gramian(&geometry.to_metric_tensor().inverse(), 2);
+    let qr = SimplexQuadRule::vertices(self.dim);
+    cell_weight
+      * qr.integrate_local(
+        &|local: CoordRef| {
+          let basis_coeffs = nc2_local_basis_coeffs(self.dim, local);
+          inner.inner_mat(&basis_coeffs, &basis_coeffs)
+        },
+        geometry.vol(),
+      )
+  }
+
+  pub fn eval(&self, geometry: &SimplexLengths) -> Matrix {
+    debug_assert!(self.weight.is_none());
+    self._eval(geometry, None)
+  }
+
+  pub fn eval_with_coords(&self, geometry: &SimplexLengths, cell: &Simplex) -> Matrix {
+    self._eval(geometry, Some(cell))
+  }
 }
 
 impl<'a> Nc1LumpedMassElmat<'a> {
