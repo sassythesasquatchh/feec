@@ -76,6 +76,41 @@ fn chart_two_form_to_xyz(p: CoordRef, major_radius: f64, coeff_theta_phi: f64) -
       .into_coeffs()
 }
 
+pub fn build_torus_reference_fields() -> (EmbeddedDiffFormClosure, EmbeddedDiffFormClosure) {
+  let u_exact = EmbeddedDiffFormClosure::ambient_one_form(
+    move |p: CoordRef| {
+      let (theta, phi, rho_val) = torus_angles(p, MAJOR_RADIUS);
+
+      let a_theta = 2.0 * (2.0 * theta).cos() * (3.0 * phi).cos()
+        - 2.0 * MINOR_RADIUS * theta.cos() / rho_val * (2.0 * phi).cos();
+
+      let a_phi = -3.0 * (2.0 * theta).sin() * (3.0 * phi).sin()
+        - rho_val / MINOR_RADIUS * theta.sin() * (2.0 * phi).sin();
+
+      chart_one_form_to_xyz(p, MAJOR_RADIUS, a_theta, a_phi)
+    },
+    3,
+    2,
+  );
+
+  let dif_solution_exact = EmbeddedDiffFormClosure::ambient_k_form(
+    move |p: CoordRef| {
+      let (theta, phi, rho_val) = torus_angles(p, MAJOR_RADIUS);
+
+      let coeff_theta_phi = (theta.sin().powi(2)
+        - (rho_val / MINOR_RADIUS + 4.0 * MINOR_RADIUS / rho_val) * theta.cos())
+        * (2.0 * phi).sin();
+
+      chart_two_form_to_xyz(p, MAJOR_RADIUS, coeff_theta_phi)
+    },
+    3,
+    2,
+    2,
+  );
+
+  (u_exact, dif_solution_exact)
+}
+
 fn resolve_example_input_path(relative_path: impl AsRef<Path>) -> io::Result<PathBuf> {
   let relative_path = relative_path.as_ref();
   let cwd_candidate = PathBuf::from(relative_path);
@@ -126,36 +161,7 @@ pub fn run_torus_convergence(
   let _ = fs::remove_dir_all(output_dir);
   fs::create_dir_all(output_dir)?;
 
-  let u_exact = EmbeddedDiffFormClosure::ambient_one_form(
-    move |p: CoordRef| {
-      let (theta, phi, rho_val) = torus_angles(p, MAJOR_RADIUS);
-
-      let a_theta = 2.0 * (2.0 * theta).cos() * (3.0 * phi).cos()
-        - 2.0 * MINOR_RADIUS * theta.cos() / rho_val * (2.0 * phi).cos();
-
-      let a_phi = -3.0 * (2.0 * theta).sin() * (3.0 * phi).sin()
-        - rho_val / MINOR_RADIUS * theta.sin() * (2.0 * phi).sin();
-
-      chart_one_form_to_xyz(p, MAJOR_RADIUS, a_theta, a_phi)
-    },
-    3,
-    2,
-  );
-
-  let dif_solution_exact = EmbeddedDiffFormClosure::ambient_k_form(
-    move |p: CoordRef| {
-      let (theta, phi, rho_val) = torus_angles(p, MAJOR_RADIUS);
-
-      let coeff_theta_phi = (theta.sin().powi(2)
-        - (rho_val / MINOR_RADIUS + 4.0 * MINOR_RADIUS / rho_val) * theta.cos())
-        * (2.0 * phi).sin();
-
-      chart_two_form_to_xyz(p, MAJOR_RADIUS, coeff_theta_phi)
-    },
-    3,
-    2,
-    2,
-  );
+  let (u_exact, dif_solution_exact) = build_torus_reference_fields();
 
   let f_exact = EmbeddedDiffFormClosure::ambient_one_form(
     move |p: CoordRef| {
