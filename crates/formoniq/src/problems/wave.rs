@@ -3,6 +3,7 @@
 use crate::{
   assemble,
   operators::{self, DofIdx},
+  problems::transient::validate_time_grid,
 };
 
 use common::linalg::{
@@ -39,6 +40,8 @@ pub fn solve_wave<F>(
 where
   F: Fn(DofIdx) -> f64,
 {
+  validate_time_grid(times);
+
   let dim = topology.dim();
   let mut laplace = assemble::assemble_galmat(
     topology,

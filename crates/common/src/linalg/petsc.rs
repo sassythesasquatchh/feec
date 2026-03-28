@@ -3,12 +3,14 @@ use std::{
   fs::File,
   io::{BufReader, BufWriter, Write},
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use super::nalgebra::{CsrMatrix, Matrix, Vector};
 
 const PETSC_SOLVER_ENV: &str = "PETSC_SOLVER_PATH";
+static PETSC_WORKSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn petsc_solver_path() -> PathBuf {
   if let Ok(path) = std::env::var(PETSC_SOLVER_ENV) {
@@ -113,6 +115,36 @@ where
         binary, current_dir, error
       )
     })
+}
+
+fn create_petsc_workspace(solver_path: &Path) -> PathBuf {
+  let workspace_id = PETSC_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+  let workspace = solver_path
+    .join("tmp")
+    .join(format!("run-{}-{workspace_id}", std::process::id()));
+
+  if workspace.exists() {
+    std::fs::remove_dir_all(&workspace).unwrap_or_else(|error| {
+      panic!("failed to clear PETSc workspace {:?}: {}", workspace, error)
+    });
+  }
+
+  std::fs::create_dir_all(workspace.join("in")).unwrap_or_else(|error| {
+    panic!(
+      "failed to create PETSc workspace input dir {:?}: {}",
+      workspace.join("in"),
+      error
+    )
+  });
+  std::fs::create_dir_all(workspace.join("out")).unwrap_or_else(|error| {
+    panic!(
+      "failed to create PETSc workspace output dir {:?}: {}",
+      workspace.join("out"),
+      error
+    )
+  });
+
+  workspace
 }
 
 const PETSC_MAT_FILE_CLASSID: i32 = 1211216;
@@ -345,23 +377,22 @@ pub fn petsc_ghiep_with_which(
   which: GhiepWhich,
 ) -> (Vector, Matrix) {
   let solver_path = petsc_solver_path();
-  std::fs::create_dir_all(solver_path.join("in")).unwrap();
-  std::fs::create_dir_all(solver_path.join("out")).unwrap();
+  let workspace = create_petsc_workspace(&solver_path);
 
-  let path = solver_path.join("in");
+  let path = workspace.join("in");
   petsc_write_matrix(lhs, path.join("A.bin").to_str().unwrap()).unwrap();
   petsc_write_matrix(rhs, path.join("B.bin").to_str().unwrap()).unwrap();
 
   let binary = solver_path.join("ghiep.out");
   let args = ghiep_args(which, neigen_values);
 
-  let status = run_petsc_command(&binary, &solver_path, &args);
+  let status = run_petsc_command(&binary, &workspace, &args);
   assert!(status.success());
 
-  let eigenvals =
-    petsc_read_eigenvals(solver_path.join("out/eigenvals.bin").to_str().unwrap()).unwrap();
+  let eigenvals = petsc_read_eigenvals(workspace.join("out/eigenvals.bin").to_str().unwrap())
+    .unwrap();
   let eigenvecs =
-    petsc_read_eigenvecs(solver_path.join("out/eigenvecs.bin").to_str().unwrap()).unwrap();
+    petsc_read_eigenvecs(workspace.join("out/eigenvecs.bin").to_str().unwrap()).unwrap();
 
   let k = neigen_values.min(eigenvals.len());
 
@@ -393,10 +424,9 @@ pub fn petsc_ghep_reduced_with_which(
   mass_solve: GhiepReducedSolve,
 ) -> (Vector, Matrix, Matrix) {
   let solver_path = petsc_solver_path();
-  std::fs::create_dir_all(solver_path.join("in")).unwrap();
-  std::fs::create_dir_all(solver_path.join("out")).unwrap();
+  let workspace = create_petsc_workspace(&solver_path);
 
-  let in_path = solver_path.join("in");
+  let in_path = workspace.join("in");
   petsc_write_matrix(l, in_path.join("L.bin").to_str().unwrap()).unwrap();
   petsc_write_matrix(d, in_path.join("D.bin").to_str().unwrap()).unwrap();
   petsc_write_matrix(c, in_path.join("C.bin").to_str().unwrap()).unwrap();
@@ -406,21 +436,21 @@ pub fn petsc_ghep_reduced_with_which(
   let binary = solver_path.join("ghep_reduced.out");
   let args = ghep_reduced_args(which, neigen_values, mass_solve);
 
-  let status = run_petsc_command(&binary, &solver_path, &args);
+  let status = run_petsc_command(&binary, &workspace, &args);
   assert!(status.success());
 
   let eigenvals =
-    petsc_read_eigenvals(solver_path.join("out/eigenvals.bin").to_str().unwrap()).unwrap();
+    petsc_read_eigenvals(workspace.join("out/eigenvals.bin").to_str().unwrap()).unwrap();
 
   let sigma_eigenvecs = petsc_read_eigenvecs(
-    solver_path
+    workspace
       .join("out/eigenvecs_sigma.bin")
       .to_str()
       .unwrap(),
   )
   .unwrap();
   let u_eigenvecs =
-    petsc_read_eigenvecs(solver_path.join("out/eigenvecs_u.bin").to_str().unwrap()).unwrap();
+    petsc_read_eigenvecs(workspace.join("out/eigenvecs_u.bin").to_str().unwrap()).unwrap();
 
   let k = neigen_values.min(eigenvals.len());
   let eigenvals = eigenvals.rows(0, k).into_owned();
@@ -474,46 +504,33 @@ pub fn petsc_ghep_reduced_iterative(
 }
 
 pub fn petsc_saddle_point(lhs: &CsrMatrix, rhs: &Vector, has_harmonics: bool) -> Vector {
-  let path = petsc_solver_path();
+  let solver_path = petsc_solver_path();
+  let workspace = create_petsc_workspace(&solver_path);
 
-  std::fs::create_dir_all(path.join("in")).unwrap_or_else(|e| {
-    panic!(
-      "create_dir_all failed for dir {:?}: {} (os error {:?})",
-      path.join("in"),
-      e,
-      e.raw_os_error()
-    )
-  });
-
-  std::fs::create_dir_all(path.join("out")).unwrap_or_else(|e| {
-    panic!(
-      "create_dir_all failed for dir {:?}: {} (os error {:?})",
-      path.join("out"),
-      e,
-      e.raw_os_error()
-    )
-  });
-
-  let in_path = path.join("in");
+  let in_path = workspace.join("in");
   petsc_write_matrix(lhs, in_path.join("A.bin").to_str().unwrap()).unwrap();
   petsc_write_vector(rhs, in_path.join("b.bin").to_str().unwrap()).unwrap();
 
-  let binary = path.join("hils.out");
+  let binary = solver_path.join("hils.out");
 
-  let preferred_args = harmonic_saddle_point_args(has_harmonics);
-  let mut status = run_petsc_command(&binary, &path, &preferred_args);
+  let preferred_args = if has_harmonics {
+    harmonic_saddle_point_args(true)
+  } else {
+    direct_saddle_point_args()
+  };
+  let mut status = run_petsc_command(&binary, &workspace, &preferred_args);
 
   if has_harmonics && !status.success() {
     eprintln!(
       "PETSc harmonic saddle-point solve failed with fieldsplit preconditioning; retrying with a direct LU factorization."
     );
 
-    status = run_petsc_command(&binary, &path, &direct_saddle_point_args());
+    status = run_petsc_command(&binary, &workspace, &direct_saddle_point_args());
   }
 
   assert!(status.success());
 
-  let out_path = path.join("out");
+  let out_path = workspace.join("out");
   petsc_read_vector(out_path.join("x.bin").to_str().unwrap()).unwrap()
 }
 
