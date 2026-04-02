@@ -309,6 +309,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "feg-core"
+version = "0.1.0"
+
+[[package]]
 name = "formoniq"
 version = "0.1.0"
 dependencies = [
@@ -316,6 +320,7 @@ dependencies = [
  "common",
  "ddf",
  "exterior",
+ "feg-core",
  "itertools",
  "manifold",
  "nalgebra",
