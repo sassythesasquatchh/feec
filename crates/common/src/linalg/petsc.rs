@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
   fs::File,
   io::{BufReader, BufWriter, Write},
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
@@ -124,9 +124,8 @@ fn create_petsc_workspace(solver_path: &Path) -> PathBuf {
     .join(format!("run-{}-{workspace_id}", std::process::id()));
 
   if workspace.exists() {
-    std::fs::remove_dir_all(&workspace).unwrap_or_else(|error| {
-      panic!("failed to clear PETSc workspace {:?}: {}", workspace, error)
-    });
+    std::fs::remove_dir_all(&workspace)
+      .unwrap_or_else(|error| panic!("failed to clear PETSc workspace {:?}: {}", workspace, error));
   }
 
   std::fs::create_dir_all(workspace.join("in")).unwrap_or_else(|error| {
@@ -389,8 +388,8 @@ pub fn petsc_ghiep_with_which(
   let status = run_petsc_command(&binary, &workspace, &args);
   assert!(status.success());
 
-  let eigenvals = petsc_read_eigenvals(workspace.join("out/eigenvals.bin").to_str().unwrap())
-    .unwrap();
+  let eigenvals =
+    petsc_read_eigenvals(workspace.join("out/eigenvals.bin").to_str().unwrap()).unwrap();
   let eigenvecs =
     petsc_read_eigenvecs(workspace.join("out/eigenvecs.bin").to_str().unwrap()).unwrap();
 
@@ -442,13 +441,8 @@ pub fn petsc_ghep_reduced_with_which(
   let eigenvals =
     petsc_read_eigenvals(workspace.join("out/eigenvals.bin").to_str().unwrap()).unwrap();
 
-  let sigma_eigenvecs = petsc_read_eigenvecs(
-    workspace
-      .join("out/eigenvecs_sigma.bin")
-      .to_str()
-      .unwrap(),
-  )
-  .unwrap();
+  let sigma_eigenvecs =
+    petsc_read_eigenvecs(workspace.join("out/eigenvecs_sigma.bin").to_str().unwrap()).unwrap();
   let u_eigenvecs =
     petsc_read_eigenvecs(workspace.join("out/eigenvecs_u.bin").to_str().unwrap()).unwrap();
 

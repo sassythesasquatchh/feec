@@ -5,11 +5,11 @@ use crate::{
 };
 
 use {
+  common::linalg::faer::FaerCholesky,
   common::linalg::petsc::{
     petsc_ghep_reduced_with_which, petsc_ghiep, petsc_ghiep_largest, petsc_saddle_point,
     GhiepReducedSolve, GhiepWhich,
   },
-  common::linalg::faer::FaerCholesky,
   ddf::{cochain::Cochain, ManifoldComplexExt},
   exterior::ExteriorGrade,
   manifold::geometry::coord::mesh::MeshCoords,
@@ -288,7 +288,8 @@ pub fn solve_hodge_laplace_transient_with_galmats(
     let [t0, t1] = t01 else { unreachable!() };
     let dt = t1 - t0;
     let prev = solution.last().unwrap();
-    let next = solve_hodge_laplace_transient_step(galmats, grade, prev, *t0, *t1, dt, theta, &config);
+    let next =
+      solve_hodge_laplace_transient_step(galmats, grade, prev, *t0, *t1, dt, theta, &config);
     solution.push(next);
   }
 
@@ -368,11 +369,28 @@ fn solve_hodge_laplace_source_with_galmats_inner(
     galmats.u_len()
   };
 
+  let sigma_rhs_len = galmats.sigma_len();
+  let u_rhs_len = galmats.u_len();
+
   let sigma_vec = if let Some(sigma_vec) = sigma_vec {
+    assert_eq!(
+      sigma_vec.len(),
+      sigma_rhs_len,
+      "sigma rhs must have full length {}, got {}.",
+      sigma_rhs_len,
+      sigma_vec.len()
+    );
     sigma_vec
   } else {
-    Vector::zeros(sigma_len)
+    Vector::zeros(sigma_rhs_len)
   };
+  assert_eq!(
+    u_vec.len(),
+    u_rhs_len,
+    "u rhs must have full length {}, got {}.",
+    u_rhs_len,
+    u_vec.len()
+  );
   let mut owned_sigma_vec = sigma_vec.into_owned();
   let mut owned_u_vec = u_vec;
 
@@ -399,7 +417,10 @@ fn solve_hodge_laplace_source_with_galmats_inner(
     assemble::reintroduce_non_homogenous_dofs_galsols(&boundary_data, &mut temp_sigma);
     Cochain::new(sigma_grade(grade), temp_sigma)
   } else {
-    Cochain::new(sigma_grade(grade), galsol.view_range(..sigma_len, 0).into_owned())
+    Cochain::new(
+      sigma_grade(grade),
+      galsol.view_range(..sigma_len, 0).into_owned(),
+    )
   };
 
   let u = if let (Some(k_strong_bc_predicate), Some(k_strong_bc_data)) =
@@ -450,12 +471,7 @@ fn boundary_data_pairs(
     .collect()
 }
 
-fn rhs_at(
-  rhs_at: &dyn Fn(f64) -> GalVec,
-  time: f64,
-  expected_len: usize,
-  label: &str,
-) -> Vector {
+fn rhs_at(rhs_at: &dyn Fn(f64) -> GalVec, time: f64, expected_len: usize, label: &str) -> Vector {
   let rhs = rhs_at(time);
   assert_eq!(
     rhs.len(),
@@ -1681,6 +1697,44 @@ mod tests {
   }
 
   #[test]
+  fn source_solver_with_strong_boundary_conditions_accepts_full_rhs_lengths() {
+    let mesh = CartesianMeshInfo::new_unit_scaled(2, 2, 1.0);
+    let (topology, coords) = mesh.compute_coord_complex();
+    let metric = coords.to_edge_lengths(&topology);
+    let galmats = MixedGalmats::compute(&topology, &metric, 1);
+    let boundary_u = topology
+      .boundary_subcomplex_simplices(1)
+      .into_iter()
+      .map(|simp| simp.kidx)
+      .collect::<HashSet<_>>();
+    let boundary_sigma = topology
+      .boundary_subcomplex_simplices(0)
+      .into_iter()
+      .map(|simp| simp.kidx)
+      .collect::<HashSet<_>>();
+    let k_strong_bc_predicate = |kidx: KSimplexIdx| boundary_u.contains(&kidx);
+    let k_minus_one_strong_bc_predicate = |kidx: KSimplexIdx| boundary_sigma.contains(&kidx);
+    let zero_data = |_kidx: KSimplexIdx| 0.0;
+
+    let (sigma, u, p) = solve_hodge_laplace_source_with_galmats_and_boundary_conditions(
+      &topology,
+      &galmats,
+      None,
+      Vector::zeros(galmats.u_len()),
+      1,
+      0,
+      &k_strong_bc_predicate,
+      &zero_data,
+      &k_minus_one_strong_bc_predicate,
+      &zero_data,
+    );
+
+    assert_eq!(sigma.coeffs().len(), galmats.sigma_len());
+    assert_eq!(u.coeffs().len(), galmats.u_len());
+    assert_eq!(p.coeffs().len(), 0);
+  }
+
+  #[test]
   fn transient_solver_zero_state_stays_zero() {
     let mesh = CartesianMeshInfo::new_unit_scaled(2, 2, 1.0);
     let (topology, coords) = mesh.compute_coord_complex();
@@ -1782,12 +1836,9 @@ mod tests {
     let sigma_rhs_at = move |_| Vector::zeros(sigma_len);
     let u_rhs_at = move |_| Vector::zeros(u_len);
     let k_strong_bc_predicate = |kidx: KSimplexIdx| boundary_u.contains(&kidx);
-    let k_strong_bc_data_at =
-      |time: f64, kidx: KSimplexIdx| time * (1.0 + kidx as f64);
-    let k_minus_one_strong_bc_predicate =
-      |kidx: KSimplexIdx| boundary_sigma.contains(&kidx);
-    let k_minus_one_strong_bc_data_at =
-      |time: f64, kidx: KSimplexIdx| -time * (1.0 + kidx as f64);
+    let k_strong_bc_data_at = |time: f64, kidx: KSimplexIdx| time * (1.0 + kidx as f64);
+    let k_minus_one_strong_bc_predicate = |kidx: KSimplexIdx| boundary_sigma.contains(&kidx);
+    let k_minus_one_strong_bc_data_at = |time: f64, kidx: KSimplexIdx| -time * (1.0 + kidx as f64);
     let config = MixedTransientConfig {
       times: &[0.0, 0.25],
       method: ThetaMethod::BACKWARD_EULER,

@@ -290,6 +290,68 @@ pub fn sample_1form_cell_vectors(
   Ok(vectors)
 }
 
+/// Sample a Whitney 2-form at cell barycenters and Hodge-dual it to ambient vectors.
+///
+/// Assumptions:
+/// - The provided cochain has degree 2 in a 3D mesh.
+/// - Coordinates are Euclidean; the Hodge dual reduces to the standard
+///   pseudovector mapping: (c01, c02, c12) -> (c12, -c02, c01).
+pub fn sample_2form_cell_vectors(
+  coords: &MeshCoords,
+  topology: &Complex,
+  cochain: &Cochain,
+) -> io::Result<Vec<[f64; 3]>> {
+  if cochain.dim() != 2 {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      format!("Expected a 2-cochain, got dim {}", cochain.dim()),
+    ));
+  }
+
+  if coords.dim() != 3 || topology.dim() != 3 {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      "sample_2form_cell_vectors supports 3D meshes only",
+    ));
+  }
+
+  let face_skeleton = topology.skeleton(2);
+  if cochain.len() != face_skeleton.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::Other,
+      format!(
+        "Cochain length {} does not match face skeleton size {}",
+        cochain.len(),
+        face_skeleton.len()
+      ),
+    ));
+  }
+
+  let topo_dim = topology.dim();
+  let geom_skeleton = topology.skeleton(topo_dim);
+  let whitney = WhitneyForm::new(cochain.clone(), topology, coords);
+
+  let mut vectors = Vec::with_capacity(geom_skeleton.len());
+  for cell in geom_skeleton.handle_iter() {
+    let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
+    let bary = cell_coords.barycenter();
+    let value = whitney.eval_known_cell(cell, &bary);
+
+    let coeffs = value.coeffs();
+    assert!(
+      coeffs.len() == 3,
+      "Expected 3 coefficients for a 2-form in 3D"
+    );
+    let c01 = coeffs[0];
+    let c02 = coeffs[1];
+    let c12 = coeffs[2];
+
+    vectors.push([c12, -c02, c01]);
+  }
+
+  Ok(vectors)
+}
+
 /// Write vector and scalar fields defined on top-dimensional cells into a single VTK file.
 pub fn write_top_cell_vtk_fields(
   path: impl AsRef<Path>,
@@ -567,31 +629,12 @@ pub fn write_2form_vector_field_vtk(
     writeln!(w, "{cell_type}")?;
   }
 
-  // Data: piecewise-constant vectors per top cell
-  let whitney = WhitneyForm::new(cochain.clone(), topology, coords);
+  let vectors = sample_2form_cell_vectors(coords, topology, cochain)?;
 
   writeln!(w, "CELL_DATA {}", ncells)?;
   writeln!(w, "VECTORS {} double", data_name)?;
 
-  for cell in geom_skeleton.handle_iter() {
-    let cell_coords = SimplexCoords::from_simplex_and_coords(&cell, coords);
-    let bary = cell_coords.barycenter();
-    let value = whitney.eval_known_cell(cell, &bary);
-
-    // value is a grade-2 element in 3D: coeffs correspond to (0,1), (0,2), (1,2)
-    let coeffs = value.coeffs();
-    assert!(
-      coeffs.len() == 3,
-      "Expected 3 coefficients for a 2-form in 3D"
-    );
-    let c01 = coeffs[0];
-    let c02 = coeffs[1];
-    let c12 = coeffs[2];
-
-    let vx = c12; // dy^dz term -> x component
-    let vy = -c02; // dx^dz term -> -y component (orientation)
-    let vz = c01; // dx^dy term -> z component
-
+  for [vx, vy, vz] in vectors {
     writeln!(w, "{vx:.12} {vy:.12} {vz:.12}")?;
   }
 
@@ -666,6 +709,21 @@ mod tests {
     let cochain = Cochain::new(1, Vector::from_element(edges.len(), 1.0));
 
     let vectors = sample_1form_cell_vectors(&coords, &topology, &cochain).unwrap();
+    assert_eq!(vectors.len(), topology.cells().len());
+    assert!(vectors
+      .iter()
+      .flat_map(|vector| vector.iter())
+      .all(|value| value.is_finite()));
+  }
+
+  #[test]
+  fn sample_2form_cell_vectors_3d_smoke() {
+    let mesh = CartesianMeshInfo::new_unit_scaled(3, 1, 1.0);
+    let (topology, coords) = mesh.compute_coord_complex();
+    let faces = topology.skeleton(2);
+    let cochain = Cochain::new(2, Vector::from_element(faces.len(), 1.0));
+
+    let vectors = sample_2form_cell_vectors(&coords, &topology, &cochain).unwrap();
     assert_eq!(vectors.len(), topology.cells().len());
     assert!(vectors
       .iter()

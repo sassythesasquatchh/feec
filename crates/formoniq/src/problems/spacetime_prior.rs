@@ -60,7 +60,10 @@ pub fn build_spatial_prior_slice_0form(
   let layout = build_state_layout(full_mass.nrows(), &boundary.state_regions)?;
   let mass = reduce_square_with_layout(&full_mass, &layout)?;
   let laplacian = reduce_square_with_layout(&full_laplacian, &layout)?;
-  let drift = add_sparse(&laplacian, &scale_matrix(&mass, config.kappa * config.kappa));
+  let drift = add_sparse(
+    &laplacian,
+    &scale_matrix(&mass, config.kappa * config.kappa),
+  );
   let precision = build_row_sum_precision(&mass, &drift, config.tau);
   let soft_boundary_constraints = build_soft_constraints(&boundary.state_regions, &layout)?;
 
@@ -84,12 +87,15 @@ pub fn build_spatial_prior_slice_1form(
   let (mass, laplacian, layout) = build_reduced_hodge_slice(
     &galmats,
     boundary,
-    Some(config.mass_inverse),
+    Some(Hodge1MassInverse::RowSumLumped),
     None,
     topology,
     geometry,
   )?;
-  let drift = add_sparse(&laplacian, &scale_matrix(&mass, config.kappa * config.kappa));
+  let drift = add_sparse(
+    &laplacian,
+    &scale_matrix(&mass, config.kappa * config.kappa),
+  );
   let mass_inverse = match config.mass_inverse {
     Hodge1MassInverse::RowSumLumped => diag_matrix(&invert_diag(&lumped_diag(&mass))),
     Hodge1MassInverse::Nc1ProjectedSparseInverse => {
@@ -127,7 +133,10 @@ pub fn build_spatial_prior_slice_2form(
     topology,
     geometry,
   )?;
-  let drift = add_sparse(&laplacian, &scale_matrix(&mass, config.kappa * config.kappa));
+  let drift = add_sparse(
+    &laplacian,
+    &scale_matrix(&mass, config.kappa * config.kappa),
+  );
   let mass_inverse = match config.mass_inverse {
     Hodge2MassInverse::ExactTopDegreeDiagonalOrProjectedNc2 => match topology.dim() {
       2 => diag_matrix(&invert_diag(&matrix_diag(&mass))),
@@ -192,16 +201,15 @@ fn build_reduced_hodge_slice(
 
   let mut sigma_rhs = Vector::zeros(galmats.sigma_len());
   let mut u_rhs = Vector::zeros(galmats.u_len());
-  let (reduced_mixed, _reduced_rhs) = galmats
-    .mixed_hodge_laplacian_with_strong_bc_via_elimination(
-      &sigma_predicate,
-      &sigma_data,
-      &state_predicate,
-      &state_data,
-      &mut sigma_rhs,
-      &mut u_rhs,
-      &harmonics,
-    );
+  let (reduced_mixed, _reduced_rhs) = galmats.mixed_hodge_laplacian_with_strong_bc_via_elimination(
+    &sigma_predicate,
+    &sigma_data,
+    &state_predicate,
+    &state_data,
+    &mut sigma_rhs,
+    &mut u_rhs,
+    &harmonics,
+  );
 
   let reduced_sigma_len = galmats.free_sigma_len(&sigma_predicate);
   let (mass_sigma, a12, a21, codifdif_u) =
@@ -234,8 +242,8 @@ fn build_reduced_hodge_slice(
         }
         dim => {
           return Err(format!(
-            "2-form mixed slice is only implemented for intrinsic mesh dimensions 2 and 3, got {dim}"
-          ))
+          "2-form mixed slice is only implemented for intrinsic mesh dimensions 2 and 3, got {dim}"
+        ))
         }
       },
     }
@@ -275,8 +283,14 @@ fn build_state_layout(
   layout_from_fixed(full_dimension, &fixed_dofs)
 }
 
-fn layout_from_fixed(full_dimension: usize, fixed_dofs: &[FixedDof]) -> Result<StateLayout, String> {
-  let fixed_indices = fixed_dofs.iter().map(|entry| entry.index).collect::<BTreeSet<_>>();
+fn layout_from_fixed(
+  full_dimension: usize,
+  fixed_dofs: &[FixedDof],
+) -> Result<StateLayout, String> {
+  let fixed_indices = fixed_dofs
+    .iter()
+    .map(|entry| entry.index)
+    .collect::<BTreeSet<_>>();
   let active_dofs = (0..full_dimension)
     .filter(|index| !fixed_indices.contains(index))
     .collect::<Vec<_>>();
@@ -310,14 +324,18 @@ fn collect_fixed_dofs(
     validate_region(region, full_dimension)?;
     for (&dof, &value) in region.dofs.iter().zip(region.values.iter()) {
       if fixed.insert(dof, value).is_some() {
-        return Err(format!("dof {dof} is fixed by multiple hard-essential regions"));
+        return Err(format!(
+          "dof {dof} is fixed by multiple hard-essential regions"
+        ));
       }
     }
   }
-  Ok(fixed
-    .into_iter()
-    .map(|(index, value)| FixedDof { index, value })
-    .collect())
+  Ok(
+    fixed
+      .into_iter()
+      .map(|(index, value)| FixedDof { index, value })
+      .collect(),
+  )
 }
 
 fn build_soft_constraints(
@@ -391,9 +409,7 @@ fn validate_region(region: &BoundaryRegionSpec, full_dimension: usize) -> Result
     if *dof >= full_dimension {
       return Err(format!(
         "boundary region '{}' references dof {} outside dimension {}",
-        region.name,
-        dof,
-        full_dimension
+        region.name, dof, full_dimension
       ));
     }
   }
@@ -437,7 +453,10 @@ fn split_reduced_mixed_blocks(
   )
 }
 
-fn reduce_square_with_layout(matrix: &CsrMatrix, layout: &StateLayout) -> Result<CsrMatrix, String> {
+fn reduce_square_with_layout(
+  matrix: &CsrMatrix,
+  layout: &StateLayout,
+) -> Result<CsrMatrix, String> {
   if matrix.nrows() != layout.full_dimension || matrix.ncols() != layout.full_dimension {
     return Err(format!(
       "matrix reduction expected a {}x{} operator, got {}x{}",
@@ -541,11 +560,13 @@ fn csr_to_triplet(matrix: &CsrMatrix) -> SparseTripletMatrix {
   SparseTripletMatrix::from_triplets(
     matrix.nrows(),
     matrix.ncols(),
-    matrix.triplet_iter().map(|(row, col, value)| SparseTriplet {
-      row,
-      col,
-      value: *value,
-    }),
+    matrix
+      .triplet_iter()
+      .map(|(row, col, value)| SparseTriplet {
+        row,
+        col,
+        value: *value,
+      }),
   )
 }
 
@@ -599,7 +620,7 @@ mod tests {
       Hodge1PriorConfig {
         kappa: 0.0,
         tau: 1.0,
-        mass_inverse: Hodge1MassInverse::RowSumLumped,
+        mass_inverse: Hodge1MassInverse::Nc1ProjectedSparseInverse,
       },
     )
     .expect("1-form slice should assemble");
@@ -636,10 +657,16 @@ mod tests {
       galmats.free_u_len(&u_pred),
     );
     let sigma_inverse = diag_matrix(&invert_diag(&lumped_diag(&mass_sigma)));
-    let expected = add_sparse(&k_matrix, &(&a21 * &sigma_inverse * &scale_matrix(&a12, -1.0)));
+    let expected = add_sparse(
+      &k_matrix,
+      &(&a21 * &sigma_inverse * &scale_matrix(&a12, -1.0)),
+    );
 
     assert_eq!(slice.drift, csr_to_triplet(&expected));
-    assert_eq!(slice.layout.reduced_dimension(), galmats.free_u_len(&u_pred));
+    assert_eq!(
+      slice.layout.reduced_dimension(),
+      galmats.free_u_len(&u_pred)
+    );
   }
 
   #[test]
@@ -667,12 +694,15 @@ mod tests {
       Hodge1PriorConfig {
         kappa: 1.0,
         tau: 1.0,
-        mass_inverse: Hodge1MassInverse::RowSumLumped,
+        mass_inverse: Hodge1MassInverse::Nc1ProjectedSparseInverse,
       },
     )
     .expect("soft 1-form slice should assemble");
 
-    assert_eq!(slice.layout.reduced_dimension(), slice.layout.full_dimension);
+    assert_eq!(
+      slice.layout.reduced_dimension(),
+      slice.layout.full_dimension
+    );
     assert_eq!(slice.soft_boundary_constraints.len(), 1);
     let constraint = &slice.soft_boundary_constraints[0];
     assert_eq!(constraint.target, vec![1.0, 2.0, 3.0]);
@@ -714,12 +744,15 @@ mod tests {
       Hodge1PriorConfig {
         kappa: 1.0,
         tau: 1.0,
-        mass_inverse: Hodge1MassInverse::RowSumLumped,
+        mass_inverse: Hodge1MassInverse::Nc1ProjectedSparseInverse,
       },
     )
     .expect("mixed 1-form slice should assemble");
 
-    assert_eq!(slice.layout.full_dimension - 1, slice.layout.reduced_dimension());
+    assert_eq!(
+      slice.layout.full_dimension - 1,
+      slice.layout.reduced_dimension()
+    );
     assert_eq!(slice.soft_boundary_constraints.len(), 1);
     let rows = slice.soft_boundary_constraints[0]
       .operator

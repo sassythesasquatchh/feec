@@ -99,9 +99,8 @@ where
     let prev = solution.last().unwrap().coeffs();
     let lhs_csr = assemble_heat_system_matrix(&mass, &laplace, diffusion_coeff, theta, dt);
     let mut lhs = common::linalg::nalgebra::CooMatrix::from(&lhs_csr);
-    let mut rhs =
-      (1.0 / dt) * (&mass * prev) - (1.0 - theta) * diffusion_coeff * (&laplace * prev)
-        + source_theta;
+    let mut rhs = (1.0 / dt) * (&mass * prev) - (1.0 - theta) * diffusion_coeff * (&laplace * prev)
+      + source_theta;
 
     assemble::enforce_dirichlet_bc(
       topology,
